@@ -57,6 +57,29 @@ Launch the main application:
 python3 main.py
 ```
 
+### Camera Selection Options
+When running `main.py` (or `test_camera.py`), you can select which camera to use:
+- **Interactive selection**: If run without flags, you will see a prompt:
+  ```text
+  Camera Source Options:
+    [1] Auto-detect (RPi Ribbon Cable -> USB/Windows)
+    [2] Raspberry Pi Ribbon Cable (CSI / picamera2)
+    [3] USB Webcam / Windows / Regular Linux (OpenCV)
+  Select camera [1-3] or press [Enter] for default (auto):
+  ```
+- **CLI Flags**:
+  - Force Raspberry Pi ribbon cable (CSI):
+    ```bash
+    python3 main.py --camera ribbon
+    ```
+  - Force USB / Windows / Regular Linux webcam:
+    ```bash
+    python3 main.py --camera usb
+    # Or specify device index (e.g. index 1 for external USB webcam):
+    python3 main.py --camera usb --device 1
+    ```
+- **Config setting**: Change `CAMERA_BACKEND = "ribbon"` or `"usb"` in `config.py`.
+
 ### Calibration on Startup
 - **First Run**: The app will automatically enter calibration mode. It displays 5 targets (4 corners + 1 center validation point) sequentially. The camera detects the points to compute a 3×3 perspective homography matrix.
 - **Subsequent Runs**: When started, it will ask:

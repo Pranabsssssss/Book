@@ -1,7 +1,11 @@
 import os
 import time
 from datetime import datetime
-import pygame
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
 
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
@@ -19,6 +23,12 @@ class Whiteboard:
     keyboard shortcuts, and PNG export.
     """
     def __init__(self, screen=None):
+        if pygame is None:
+            raise RuntimeError(
+                "Pygame is required for the Whiteboard canvas. "
+                "Please install dependencies with: pip install -r requirements.txt"
+            )
+
         if not pygame.get_init():
             pygame.init()
 

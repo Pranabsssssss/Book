@@ -6,6 +6,13 @@ SCREEN_WIDTH = 1920
 SCREEN_HEIGHT = 1080
 
 # === Camera Configuration ===
+# Backend selection:
+#   "auto"   - Automatically detect (tries ribbon cable picamera2, then USB/OpenCV)
+#   "ribbon" - Force Raspberry Pi CSI camera via onboard ribbon cable (picamera2)
+#   "usb"    - Force USB / standard webcam via OpenCV (for Windows, macOS, or regular Linux)
+CAMERA_BACKEND = "auto"
+CAMERA_DEVICE_INDEX = 0       # Device index for USB/OpenCV webcam (0 is default webcam)
+
 # Captured at 640x480 for real-time 30fps processing on Raspberry Pi 3B+
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480

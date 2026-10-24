@@ -278,7 +278,13 @@ if __name__ == "__main__":
 
 ### 6.2 `camera.py` — Camera Capture
 
-**Purpose**: Manage the Pi camera lifecycle (start, capture, stop). Abstract away picamera2 details.
+**Purpose**: Manage the camera lifecycle (start, capture, stop). Supports both Raspberry Pi CSI ribbon cable camera and USB/Windows/Linux webcams.
+
+**Camera Options Supported**:
+- **Ribbon cable (RPi CSI)**: Uses `picamera2` (the modern Raspberry Pi camera stack).
+- **USB / Windows / Regular Linux**: Uses `cv2.VideoCapture` via OpenCV (DirectShow on Windows, V4L2 on Linux).
+- **Auto-detect**: Tries ribbon cable (`picamera2`) first, falls back to USB webcam (`cv2.VideoCapture`).
+- Configurable via CLI (`--camera ribbon`, `--camera usb`, `--device 0`), interactive startup prompt, or `CAMERA_BACKEND` in `config.py`.
 
 **Key Design Decisions**:
 - Capture at **640×480** resolution for performance on RPi 3B+
