@@ -98,26 +98,26 @@ After calibration is complete, the application prompts you to choose an operatin
 ```text
 Select Operating Mode:
   [1] Production Mode (Clean fullscreen whiteboard canvas)
-  [2] Testing / Development Mode (Live camera, OpenCV threshold & tracking HUD)
+  [2] Testing / Development Mode (Dedicated OpenCV camera feed, threshold mask & test pad)
 Enter mode [1-2] or press [Enter] for default (production):
 ```
 
-- **Production Mode**: Clean fullscreen whiteboard canvas with no UI clutter. Direct IR drawing experience.
-- **Testing / Development Mode**: Displays the whiteboard alongside:
-  1. **Live Camera Feed**: Real-time camera view with detected IR green target reticles and coordinates.
-  2. **OpenCV Threshold Mask**: Binary black/white view showing exactly what pixels pass the IR brightness threshold.
-  3. **Telemetry & Controls HUD**: Real-time FPS, camera coordinates, transformed screen coordinates, blob area, action state, and active threshold.
-  4. **Screen Tracking Reticle**: Visual crosshair showing where the camera is projecting the pen onto the display in real time.
+- **Production Mode**: Clean fullscreen whiteboard canvas with no UI clutter. Direct IR drawing experience with automatic pen lift and anti-spike line filtering.
+- **Testing / Development Mode**: Dedicated OpenCV test bench (does not draw all over your screen):
+  1. **Large Live Camera Feed (540x405)**: Real-time camera view with precision green reticle tracking the IR LED / remote light, while excluding ambient ceiling glare.
+  2. **Large OpenCV Threshold Mask (540x405)**: Binary mask showing exactly what pixels pass the active brightness threshold.
+  3. **Diagnostics & Telemetry**: Real-time FPS, camera coordinates `(cx, cy)`, screen coordinates `(sx, sy)`, peak brightness (240-255), and blob area.
+  4. **Interactive Test Drawing Pad**: Dedicated preview pad where you can test strokes and verify button tapping without affecting the whiteboard.
 - **Command-Line Selection**:
   ```bash
-  # Start directly in Testing / Dev Mode:
+  # Start directly in Testing / Dev Bench:
   python3 main.py --mode dev
 
   # Start directly in Production Mode:
   python3 main.py --mode prod
   ```
-- **Runtime Mode Toggle**: Press **`TAB`** or **`D`** on your keyboard anytime while the app is running to switch between Production and Testing modes instantly!
-- **Dynamic Threshold Tuning**: Press **`[`** to decrease or **`]`** to increase the IR detection threshold live in response to ambient lighting.
+- **Runtime Mode Toggle**: Press **`TAB`** or **`D`** on your keyboard anytime while the app is running to switch between Production Whiteboard and Testing Bench instantly!
+- **Dynamic Threshold Tuning**: Press **`[`** to decrease or **`]`** to increase the IR detection threshold live in response to ambient room lighting.
 
 ---
 
@@ -125,11 +125,11 @@ Enter mode [1-2] or press [Enter] for default (production):
 
 | Action | How to Trigger |
 |---|---|
-| **Draw White Stroke** | Press and hold button on the IR pen. |
-| **Stop Drawing (Pen Lift)** | Release button on the IR pen. |
-| **Toggle Eraser Mode** | Hover IR pen over the **ERASER** button (bottom-right) for **0.5s** (dwell), or press **`E`** on keyboard. |
-| **Save Drawing (PNG)** | Hover IR pen over the **SAVE** button (bottom-right) for **0.5s** (dwell), or press **`S`** on keyboard. Files are saved in `saves/`. |
-| **Clear Canvas** | Press **`C`** on keyboard. |
+| **Draw White Stroke** | Press and hold button on the IR pen / remote control. |
+| **Stop Drawing (Pen Lift)** | Release button on the IR pen / remote (light turns off $\rightarrow$ immediate pen lift). |
+| **Toggle Eraser Mode** | Blink/tap IR light on the **ERASER** button (bottom-right), or press **`E`** on keyboard. |
+| **Save Drawing (PNG)** | Blink/tap IR light on the **SAVE** button (bottom-right), or press **`S`** on keyboard. Files are saved in `saves/`. |
+| **Clear Canvas / Test Pad** | Press **`C`** on keyboard. |
 | **Toggle Dev / Prod Mode** | Press **`TAB`** or **`D`** on keyboard. |
 | **Adjust IR Threshold Live** | Press **`[`** (lower threshold) or **`]`** (raise threshold). |
 | **Exit Application** | Press **`ESC`** on keyboard. |

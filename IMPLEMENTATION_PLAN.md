@@ -45,9 +45,10 @@
 |---|---|
 | **Calibration** | Camera-to-display coordinate mapping using 5 calibration dots |
 | **Production Mode** | Clean fullscreen whiteboard canvas with white pen on black background |
-| **Testing / Dev Mode** | Simultaneous whiteboard + live camera tracking feed, OpenCV threshold mask, and telemetry HUD |
-| **Eraser** | On-screen button zone — point IR pen at it to toggle eraser mode |
-| **Save** | On-screen button zone — point IR pen at it to save canvas as PNG |
+| **Testing / Dev Mode** | Dedicated OpenCV testing bench: large live camera feed, threshold mask, telemetry, and test pad |
+| **Eraser** | On-screen button zone — blink/tap IR light to toggle eraser mode |
+| **Save** | On-screen button zone — blink/tap IR light to save canvas as PNG |
+| **Anti-Spike Filter** | Prevents spurious teleport lines across the screen when pen moves while off |
 | **Persistence** | Calibration data saved to JSON, reusable across sessions |
 
 ### What the IR Pen Is
