@@ -21,10 +21,9 @@ from config import (
 class Whiteboard:
     """
     Smart Notebook Whiteboard System.
-    Provides two distinct operating interfaces:
-      1. Production Mode: Clean fullscreen interactive whiteboard with IR pen drawing.
-      2. Development / Testing Mode: Dedicated OpenCV test bench showing large live
-         camera feed, threshold mask, lighting telemetry, and test drawing pad.
+    Draws circular dots and strokes wherever light turns on inside the calibrated display area.
+    Supports continuous drawing, pulsating/blinking remote lights, eraser toggle,
+    button blink/tap detection, and a dedicated DocScanner-style testing bench.
     """
     def __init__(self, screen=None, dev_mode=False):
         if pygame is None:
@@ -115,9 +114,9 @@ class Whiteboard:
 
     def handle_point(self, screen_point: tuple):
         """
-        Process a detected pen location in screen coordinates.
-        Determines whether point interacts with UI controls or paints on canvas.
-        Includes anti-spike distance checking and button blink/tap detection.
+        Process a detected light location in screen coordinates.
+        Draws a dot wherever the light turns on (regardless of blinking or pulsing).
+        Also checks button hits (Save/Eraser).
         """
         now = time.time()
         px = max(0, min(SCREEN_WIDTH - 1, int(screen_point[0])))
@@ -127,12 +126,12 @@ class Whiteboard:
 
         # -------------------------------------------------------------
         # 1. Check Button Zones (ERASER & SAVE)
-        # When light hits or blinks on a button: DO NOT draw on canvas!
+        # When light hits or blinks on a button: trigger action and DO NOT draw!
         # -------------------------------------------------------------
         if self._point_in_rect(pt, ERASER_BUTTON_RECT):
             self.eraser_dwell += 1
             self.save_dwell = 0
-            self.prev_point = None  # Never draw lines through buttons!
+            self.prev_point = None
 
             if self.eraser_dwell >= BUTTON_DWELL_FRAMES:
                 if now - self.last_button_trigger_time > 0.6:
@@ -161,72 +160,63 @@ class Whiteboard:
         self.save_dwell = max(0, self.save_dwell - 1)
 
         # -------------------------------------------------------------
-        # 2. Canvas Drawing / Erasing
+        # 2. Draw or Erase at the Light Location
+        # Whenever light turns on (even if blinking), stamp a circular dot!
         # -------------------------------------------------------------
-        # Anti-spike / Anti-jump filter: if the coordinate jumped wildly (> MAX_STROKE_JUMP px)
-        # in a single frame, start a new stroke rather than drawing a huge diagonal line!
+        color = (0, 0, 0) if self.eraser_mode else PEN_COLOR
+        radius = ERASER_RADIUS if self.eraser_mode else PEN_RADIUS
+
+        # ALWAYS draw a solid circle dot at the exact location where light turned on / blinks
+        pygame.draw.circle(self.canvas, color, pt, radius)
+
+        # Smooth connection: only connect if hand is smoothly drawing (< 35px between frames)
+        # If pen blinks or jumps across the board, do not draw a connecting line!
         if self.prev_point is not None:
             dx = pt[0] - self.prev_point[0]
             dy = pt[1] - self.prev_point[1]
             dist = (dx * dx + dy * dy) ** 0.5
-            if dist > MAX_STROKE_JUMP:
+            if dist <= 35:
+                self._draw_interpolated_stroke(self.canvas, color, self.prev_point, pt, radius)
+            else:
                 self.prev_point = None
-
-        if self.eraser_mode:
-            # Erasing with solid black
-            if self.prev_point is not None:
-                self._draw_interpolated_stroke(self.canvas, (0, 0, 0), self.prev_point, pt, ERASER_RADIUS)
-            else:
-                pygame.draw.circle(self.canvas, (0, 0, 0), pt, ERASER_RADIUS)
-        else:
-            # Drawing with white pen
-            if self.prev_point is not None:
-                self._draw_interpolated_stroke(self.canvas, PEN_COLOR, self.prev_point, pt, PEN_RADIUS)
-            else:
-                pygame.draw.circle(self.canvas, PEN_COLOR, pt, PEN_RADIUS)
 
         self.prev_point = pt
         self.last_point_time = now
 
         # Also update Dev Mode test pad if in dev mode
         if self.dev_mode:
-            self._handle_dev_test_pad_point(pt)
+            self._handle_dev_test_pad_point(pt, color, radius)
 
-    def _handle_dev_test_pad_point(self, pt):
+    def _handle_dev_test_pad_point(self, pt, color, radius):
         """Draw on the mini test pad inside Development Mode."""
-        # Map screen coordinate into test pad relative coordinates
         t_x = int(pt[0] * (self.dev_test_pad_w / SCREEN_WIDTH))
         t_y = int(pt[1] * (self.dev_test_pad_h / SCREEN_HEIGHT))
         pad_pt = (t_x, t_y)
+        pad_radius = max(2, radius // 2)
+
+        # Stamp dot on test pad
+        pygame.draw.circle(self.dev_test_pad, color, pad_pt, pad_radius)
 
         if self.dev_prev_point is not None:
             dx = pad_pt[0] - self.dev_prev_point[0]
             dy = pad_pt[1] - self.dev_prev_point[1]
-            if (dx * dx + dy * dy) ** 0.5 > 60:
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist <= 20:
+                self._draw_interpolated_stroke(self.dev_test_pad, color, self.dev_prev_point, pad_pt, pad_radius)
+            else:
                 self.dev_prev_point = None
-
-        color = (0, 0, 0) if self.eraser_mode else PEN_COLOR
-        radius = max(2, PEN_RADIUS // 2)
-
-        if self.dev_prev_point is not None:
-            self._draw_interpolated_stroke(self.dev_test_pad, color, self.dev_prev_point, pad_pt, radius)
-        else:
-            pygame.draw.circle(self.dev_test_pad, color, pad_pt, radius)
 
         self.dev_prev_point = pad_pt
 
     def handle_no_point(self):
         """
-        Invoked when no IR light is detected in the current frame (pen button released).
-        Immediately stops continuous drawing stroke.
+        Invoked when no IR light is detected in the current frame (light off / lifted).
         """
         self.current_screen_point = None
-        # Pen lift: immediately break stroke continuity
         if time.time() - self.last_point_time > PEN_LIFT_TIMEOUT:
             self.prev_point = None
             self.dev_prev_point = None
 
-        # Gentle decay on dwell
         self.eraser_dwell = max(0, self.eraser_dwell - 1)
         self.save_dwell = max(0, self.save_dwell - 1)
 
@@ -251,7 +241,6 @@ class Whiteboard:
                 elif event.key == pygame.K_c:
                     self.clear_canvas()
                 elif event.key in (pygame.K_TAB, pygame.K_d):
-                    # Toggle between Production and Development Mode
                     self.dev_mode = not self.dev_mode
                     label = "Mode: TESTING / DEV BENCH" if self.dev_mode else "Mode: PRODUCTION (Clean Whiteboard)"
                     self.notification = (label, time.time() + 2.0)
@@ -263,7 +252,6 @@ class Whiteboard:
                 elif event.key in (pygame.K_RIGHTBRACKET, pygame.K_EQUALS, pygame.K_PLUS):
                     self.threshold_delta += 2
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # Mouse click support for PC testing
                 self.handle_point(event.pos)
             elif event.type == pygame.MOUSEMOTION and event.buttons[0]:
                 self.handle_point(event.pos)
@@ -271,17 +259,10 @@ class Whiteboard:
                 self.handle_no_point()
 
         if self.dev_mode:
-            # ---------------------------------------------------------
-            # DEVELOPMENT / TESTING BENCH LAYOUT
-            # Dedicated testing screen: Large camera, threshold mask, telemetry, test pad.
-            # (Does NOT draw all over the fullscreen background!)
-            # ---------------------------------------------------------
+            # Development Mode: dedicated OpenCV testing studio
             self._render_dev_bench()
         else:
-            # ---------------------------------------------------------
-            # PRODUCTION MODE LAYOUT
-            # Pure fullscreen black canvas with corner buttons
-            # ---------------------------------------------------------
+            # Production Mode: clean fullscreen black whiteboard
             self.screen.blit(self.canvas, (0, 0))
             self._render_buttons()
             self._render_status()
@@ -290,8 +271,7 @@ class Whiteboard:
         self.clock.tick(30)
 
     def _render_dev_bench(self):
-        """Dedicated Development Mode Screen with large OpenCV feeds and telemetry."""
-        # Solid dark studio background
+        """Dedicated Development Mode Screen with large OpenCV feeds and DocScanner bounds."""
         self.screen.fill((18, 22, 28))
 
         # Top Header Bar
@@ -314,10 +294,10 @@ class Whiteboard:
         col2_x = margin_x + DEV_CAMERA_WIDTH + col_gap
         row2_y = top_y + DEV_CAMERA_HEIGHT + 36
 
-        # --- 1. Top Left: Live Camera Tracking Feed ---
+        # --- 1. Top Left: Live Camera Tracking Feed with DocScanner Quad ---
         pygame.draw.rect(self.screen, (10, 12, 16), (margin_x - 4, top_y - 28, DEV_CAMERA_WIDTH + 8, DEV_CAMERA_HEIGHT + 36), border_radius=8)
         pygame.draw.rect(self.screen, (0, 180, 255), (margin_x - 4, top_y - 28, DEV_CAMERA_WIDTH + 8, DEV_CAMERA_HEIGHT + 36), 2, border_radius=8)
-        lbl_cam = self.font_hud_title.render("LIVE CAMERA FEED (Tracking & Peak LED)", True, (0, 220, 255))
+        lbl_cam = self.font_hud_title.render("LIVE CAMERA FEED (DocScanner Bounds & LED)", True, (0, 220, 255))
         self.screen.blit(lbl_cam, (margin_x + 8, top_y - 24))
         if self.dev_frame_surf:
             self.screen.blit(self.dev_frame_surf, (margin_x, top_y + 4))
@@ -340,38 +320,39 @@ class Whiteboard:
 
         fps = self.clock.get_fps()
         cam_pt = self.dev_info.get("point")
-        cam_str = f"({cam_pt[0]:.1f}, {cam_pt[1]:.1f})" if cam_pt else "NONE (No light)"
-        scr_str = f"({self.current_screen_point[0]}, {self.current_screen_point[1]})" if self.current_screen_point else "NONE (Off-screen)"
-        area_val = self.dev_info.get("area", 0.0)
+        cam_str = f"({cam_pt[0]:.1f}, {cam_pt[1]:.1f})" if cam_pt else "NONE (Light Off)"
+        scr_str = f"({self.current_screen_point[0]}, {self.current_screen_point[1]})" if self.current_screen_point else "NONE"
+        circ_val = self.dev_info.get("circularity", 0.0)
+        aspect_val = self.dev_info.get("aspect_ratio", 0.0)
+        in_display = self.dev_info.get("in_display_area", False)
         peak_val = self.dev_info.get("peak_brightness", 0)
-        status = self.dev_info.get("status", "SEARCHING")
 
-        action_str = "PEN UP (LIFTED / OFF)"
+        action_str = "LIGHT OFF (PEN LIFTED)"
         if self.current_screen_point:
             if self._point_in_rect(self.current_screen_point, ERASER_BUTTON_RECT):
                 action_str = f"OVER ERASER BUTTON [Hits: {self.eraser_dwell}]"
             elif self._point_in_rect(self.current_screen_point, SAVE_BUTTON_RECT):
                 action_str = f"OVER SAVE BUTTON [Hits: {self.save_dwell}]"
             elif self.eraser_mode:
-                action_str = "ERASING"
+                action_str = "ERASING DOT"
             else:
-                action_str = "DRAWING (PEN DOWN / ON)"
+                action_str = "LIGHT ON (MARKING DOT)"
 
         tele_lines = [
             f"FPS              : {fps:.1f}",
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
+            f"Display Bounds   : DocScanner Quad (Active)",
+            f"In Display Area  : {'YES (Valid Drawing Zone)' if in_display else 'NO (Outside Screen Quad)'}",
+            f"Dot Geometry     : Circ: {circ_val:.2f} | Aspect: {aspect_val:.2f} (Circles Only)",
             f"Camera Point     : {cam_str}",
             f"Screen Point     : {scr_str}",
-            f"Peak Brightness  : {peak_val} / 255 (Remote/IR target: 240-255)",
-            f"Contour Area     : {area_val:.1f} px (Target LED: 3 - 150 px)",
-            f"Detection Status : {status}",
-            f"Pen Action State : {action_str}",
-            f"Shortcuts        : [TAB] Switch to Whiteboard  [C] Clear Test Pad"
+            f"Peak Brightness  : {peak_val} / 255",
+            f"Marker Action    : {action_str}",
         ]
 
         text_y = row2_y + 8
         for line in tele_lines:
-            color = (120, 255, 150) if "Pen Action" in line and "DRAWING" in line else (210, 215, 225)
+            color = (120, 255, 150) if "LIGHT ON" in line or "YES" in line else (210, 215, 225)
             line_surf = self.font_hud_val.render(line, True, color)
             self.screen.blit(line_surf, (margin_x + 14, text_y))
             text_y += 26
@@ -379,7 +360,7 @@ class Whiteboard:
         # --- 4. Bottom Right: Interactive Test Drawing Pad ---
         pygame.draw.rect(self.screen, (10, 12, 16), (col2_x - 4, row2_y - 28, tele_w + 8, tele_h + 36), border_radius=8)
         pygame.draw.rect(self.screen, (180, 100, 255), (col2_x - 4, row2_y - 28, tele_w + 8, tele_h + 36), 2, border_radius=8)
-        lbl_pad = self.font_hud_title.render("INTERACTIVE TEST DRAWING PAD (Preview)", True, (200, 130, 255))
+        lbl_pad = self.font_hud_title.render("TEST DRAWING PAD (Preview: Dots Appear Here)", True, (200, 130, 255))
         self.screen.blit(lbl_pad, (col2_x + 8, row2_y - 24))
         self.screen.blit(self.dev_test_pad, (col2_x, row2_y + 4))
 
@@ -398,7 +379,6 @@ class Whiteboard:
             pygame.image.save(self.canvas, filepath)
             self.notification = (f"Saved: {filename}", time.time() + 2.5)
             print(f"[Whiteboard] Saved drawing to: {filepath}")
-            # Visual green flash on screen border
             pygame.draw.rect(self.screen, (60, 255, 60), (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT), 8)
             pygame.display.flip()
             pygame.time.wait(150)
@@ -494,7 +474,7 @@ class Whiteboard:
 
 
 if __name__ == "__main__":
-    print("Testing Whiteboard module standalone (windowed mode for test)...")
+    print("Testing Whiteboard module standalone...")
     wb = Whiteboard()
     print("Whiteboard initialized successfully.")
     wb.cleanup()

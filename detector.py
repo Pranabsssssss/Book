@@ -9,32 +9,35 @@ from config import (
 
 class IRDetector:
     """
-    Precision IR and bright light spot detector optimized for IR pens and remote LEDs.
-    Rejects ambient ceiling glare, bezel reflections, and window lights using
-    edge-exclusion zones, compactness scoring, and peak-brightness evaluation.
+    Circular Dot & IR LED Light Detector.
+    Specifically calculates and filters for compact circular dots and circles
+    (IR pen and remote control LED). Rejects elongated strips, ceiling glare,
+    and ambient light outside the calibrated display area.
     """
     def __init__(self, threshold=IR_THRESHOLD, min_area=IR_MIN_AREA, max_area=IR_MAX_AREA):
         self.threshold = threshold
         self.min_area = min_area
         self.max_area = max_area
 
-    def detect(self, frame: np.ndarray, threshold: int = None):
+    def detect(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
         """
-        Locate the centroid of the IR pen / remote LED in the camera frame.
+        Locate the centroid of the circular IR dot in the camera frame.
         Returns:
             (x, y) tuple in camera pixel coordinates, or None.
         """
-        pt, _, _, _ = self.detect_debug(frame, threshold=threshold)
+        pt, _, _, _ = self.detect_debug(frame, threshold=threshold, display_quad=display_quad)
         return pt
 
-    def detect_debug(self, frame: np.ndarray, threshold: int = None):
+    def detect_debug(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
         """
-        Comprehensive detection with OpenCV visualization and telemetry.
+        Comprehensive circular dot detection with OpenCV visualization and telemetry.
+        Draws the DocScanner-style display boundary quad and precision circle reticle.
+
         Returns:
             point: (cx, cy) tuple or None
-            annotated_frame: RGB image with active target reticle and glare indicators
+            annotated_frame: RGB image with active target reticle and display quad overlay
             thresh_rgb: RGB image of the binary threshold mask
-            metadata: dict containing area, peak brightness, status, etc.
+            metadata: dict containing area, circularity, aspect ratio, peak brightness, etc.
         """
         if frame is None:
             empty = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
@@ -48,7 +51,7 @@ class IRDetector:
         else:
             gray = frame
 
-        # Use 3x3 blur to preserve small pinpoint LED cores
+        # Use 3x3 blur to preserve small pinpoint circular LED cores
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
         # Threshold for intensely bright pixels
@@ -58,13 +61,24 @@ class IRDetector:
         thresh_rgb = cv2.cvtColor(thresh, cv2.COLOR_GRAY2RGB)
         annotated = frame.copy()
 
-        # Draw subtle edge-exclusion boundary (top ceiling margin & borders)
-        cv2.rectangle(
-            annotated,
-            (CAMERA_EDGE_MARGIN_SIDE, CAMERA_EDGE_MARGIN_TOP),
-            (w - CAMERA_EDGE_MARGIN_SIDE, h - CAMERA_EDGE_MARGIN_BOTTOM),
-            (60, 60, 90), 1
-        )
+        # -----------------------------------------------------------------
+        # Render DocScanner Display Boundary Quad (if calibrated)
+        # -----------------------------------------------------------------
+        if display_quad is not None:
+            quad_int = display_quad.astype(np.int32)
+            cv2.polylines(annotated, [quad_int], isClosed=True, color=(0, 240, 255), thickness=2)
+
+            corner_labels = ["TL", "TR", "BR", "BL"]
+            for i, (cx_pt, cy_pt) in enumerate(quad_int):
+                cv2.circle(annotated, (cx_pt, cy_pt), 5, (0, 255, 100), -1)
+                cv2.putText(annotated, corner_labels[i], (cx_pt + 6, cy_pt - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1)
+
+            # Center tag
+            center_x = int(np.mean(display_quad[:, 0]))
+            center_y = int(np.mean(display_quad[:, 1]))
+            cv2.putText(annotated, "DISPLAY BOUNDS", (center_x - 55, center_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 255), 1)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -72,7 +86,10 @@ class IRDetector:
             "threshold": thresh_val,
             "num_contours": len(contours) if contours else 0,
             "area": 0.0,
+            "circularity": 0.0,
+            "aspect_ratio": 0.0,
             "peak_brightness": 0,
+            "in_display_area": False,
             "point": None,
             "status": "SEARCHING"
         }
@@ -84,7 +101,7 @@ class IRDetector:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
             return None, annotated, thresh_rgb, metadata
 
-        scored_candidates = []
+        circular_candidates = []
 
         for c in contours:
             area = cv2.contourArea(c)
@@ -95,98 +112,127 @@ class IRDetector:
             cx = float(M["m10"] / M["m00"])
             cy = float(M["m01"] / M["m00"])
 
-            # 1. Edge Exclusion Filter: discard blobs on the top ceiling edge or outer borders
+            # 1. Edge Exclusion Filter: discard edge-touching border glare
             if (cy < CAMERA_EDGE_MARGIN_TOP or
                 cy > (h - CAMERA_EDGE_MARGIN_BOTTOM) or
                 cx < CAMERA_EDGE_MARGIN_SIDE or
                 cx > (w - CAMERA_EDGE_MARGIN_SIDE)):
-                # Mark as rejected border glare
-                cv2.drawContours(annotated, [c], -1, (220, 50, 50), 1)
+                cv2.drawContours(annotated, [c], -1, (180, 50, 50), 1)
                 continue
 
-            # 2. Area Filter: reject oversized ambient fixtures or tiny noise
+            # 2. Area Filter: must be compact (3 - 150 px)
             if not (self.min_area <= area <= self.max_area):
-                cv2.drawContours(annotated, [c], -1, (200, 120, 40), 1)
+                cv2.drawContours(annotated, [c], -1, (180, 100, 40), 1)
                 continue
 
-            # 3. Peak Brightness in contour region
+            # 3. Geometric Aspect Ratio Filter: must be roughly square / circular
             x_b, y_b, w_b, h_b = cv2.boundingRect(c)
+            aspect_ratio = float(w_b) / max(1.0, float(h_b))
+            if not (0.50 <= aspect_ratio <= 2.0):
+                # Reject elongated lines or vertical/horizontal strips
+                cv2.drawContours(annotated, [c], -1, (180, 60, 60), 1)
+                continue
+
+            # 4. Circularity Filter: 4*pi*area / perimeter^2
+            peri = cv2.arcLength(c, True)
+            circularity = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.0
+            if circularity < 0.40:
+                # Reject jagged or non-circular shapes
+                cv2.drawContours(annotated, [c], -1, (180, 60, 60), 1)
+                continue
+
+            # 5. Peak Brightness in contour region
             roi_gray = gray[y_b:y_b + h_b, x_b:x_b + w_b]
             peak_val = int(np.max(roi_gray)) if roi_gray.size > 0 else 0
 
-            # 4. Circularity / Compactness Score
-            peri = cv2.arcLength(c, True)
-            circularity = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.0
+            # 6. Check if inside calibrated display quad (DocScanner area)
+            in_display = True
+            if display_quad is not None:
+                poly = display_quad.astype(np.float32)
+                in_display = (cv2.pointPolygonTest(poly, (cx, cy), False) >= 0)
 
-            # Composite Score: favors bright saturated core and compact circular shape
-            # (Remote LEDs and IR pen tips are compact; elongated strips of ceiling glare are penalized)
-            score = (peak_val * 2.0) + (circularity * 60.0) - (area * 0.2)
+            # Composite Score: favors circular shape, high peak brightness, and display area containment
+            score = (peak_val * 2.0) + (circularity * 80.0) - (area * 0.15)
+            if not in_display:
+                score -= 1000.0  # Penalize outside-display points
 
-            scored_candidates.append({
+            circular_candidates.append({
                 "score": score,
                 "point": (cx, cy),
                 "contour": c,
                 "area": area,
+                "circularity": circularity,
+                "aspect_ratio": aspect_ratio,
                 "peak": peak_val,
-                "circularity": circularity
+                "in_display": in_display
             })
 
-        if not scored_candidates:
-            cv2.putText(annotated, "GLARE / AMBIENT REJECTED", (15, 30),
+        if not circular_candidates:
+            cv2.putText(annotated, "GLARE / NON-CIRCULAR REJECTED", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 140, 40), 2)
-            cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (NO VALID LED)", (15, 30),
+            cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (NO CIRCULAR DOT)", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
-            metadata["status"] = "GLARE_REJECTED"
+            metadata["status"] = "FILTERED_NON_CIRCULAR"
             return None, annotated, thresh_rgb, metadata
 
-        # Pick the highest-scoring candidate (the actual IR LED / remote)
-        scored_candidates.sort(key=lambda item: item["score"], reverse=True)
-        best = scored_candidates[0]
+        # Pick the highest-scoring circular dot
+        circular_candidates.sort(key=lambda item: item["score"], reverse=True)
+        best = circular_candidates[0]
 
         best_pt = best["point"]
         best_contour = best["contour"]
         icx, icy = int(best_pt[0]), int(best_pt[1])
+        in_display = best["in_display"]
 
-        # Draw contour boundary in bright yellow
+        # Color-coded feedback: Green if inside display, Red if outside
+        reticle_color = (0, 255, 0) if in_display else (0, 0, 255)
+
+        # Draw contour boundary
         cv2.drawContours(annotated, [best_contour], -1, (255, 230, 0), 2)
 
-        # Draw precision target reticle in green
-        cv2.circle(annotated, (icx, icy), 14, (0, 255, 0), 2)
-        cv2.circle(annotated, (icx, icy), 3, (0, 255, 0), -1)
-        cv2.line(annotated, (icx - 20, icy), (icx + 20, icy), (0, 255, 0), 2)
-        cv2.line(annotated, (icx, icy - 20), (icx, icy + 20), (0, 255, 0), 2)
+        # Draw circular target reticle
+        cv2.circle(annotated, (icx, icy), 14, reticle_color, 2)
+        cv2.circle(annotated, (icx, icy), 3, reticle_color, -1)
+        cv2.line(annotated, (icx - 20, icy), (icx + 20, icy), reticle_color, 2)
+        cv2.line(annotated, (icx, icy - 20), (icx, icy + 20), reticle_color, 2)
 
-        # Text annotation on camera feed
-        label = f"LED: ({icx}, {icy}) Area:{best['area']:.0f}px Peak:{best['peak']}"
+        # Annotation text
+        status_tag = "IN DISPLAY" if in_display else "OUTSIDE DISPLAY"
+        label = f"DOT: ({icx}, {icy}) Circ:{best['circularity']:.2f} [{status_tag}]"
         cv2.putText(annotated, label, (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
-        cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (IR LED TRACKED)", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, reticle_color, 2)
+        cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (CIRCULAR DOT DETECTED)", (15, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
 
-        # Highlight on threshold mask as well
+        # Mark on threshold mask
         cv2.circle(thresh_rgb, (icx, icy), 8, (0, 255, 0), 1)
 
         metadata["area"] = best["area"]
+        metadata["circularity"] = best["circularity"]
+        metadata["aspect_ratio"] = best["aspect_ratio"]
         metadata["peak_brightness"] = best["peak"]
+        metadata["in_display_area"] = in_display
         metadata["point"] = best_pt
-        metadata["status"] = "TRACKING"
+        metadata["status"] = "TRACKING_DOT" if in_display else "OUTSIDE_DISPLAY"
 
-        return best_pt, annotated, thresh_rgb, metadata
+        # Only return point for drawing if it is INSIDE the display area!
+        return (best_pt if in_display else None), annotated, thresh_rgb, metadata
 
 
 if __name__ == "__main__":
-    print("Testing IRDetector with remote crop test...")
-    # Synthetic test
+    print("Testing IRDetector with circular dot and DocScanner quad...")
     img = np.zeros((480, 640, 3), dtype=np.uint8)
-    # Add ambient glare at top edge (y=8, area=250)
-    cv2.rectangle(img, (200, 2), (350, 14), (250, 250, 250), -1)
-    # Add compact remote LED at (320, 240) (area ~ 25, peak=255)
-    cv2.circle(img, (320, 240), 4, (255, 255, 255), -1)
+    # Add a round circle at (300, 200)
+    cv2.circle(img, (300, 200), 5, (255, 255, 255), -1)
+    # Add an elongated strip at (100, 100) (area=60, aspect=6.0, non-circular)
+    cv2.rectangle(img, (70, 95), (130, 105), (255, 255, 255), -1)
 
     det = IRDetector(threshold=240)
-    pt, debug_img, mask_img, meta = det.detect_debug(img)
-    print(f"Detected point: {pt}")
-    print(f"Metadata: {meta}")
-    assert pt is not None, "Detector failed to find LED"
-    assert abs(pt[0] - 320) < 3 and abs(pt[1] - 240) < 3, f"Incorrect point chosen: {pt} (expected 320, 240)"
-    print("IRDetector edge-rejection and LED scoring verified successfully!")
+    quad = np.array([[50, 50], [550, 50], [550, 450], [50, 450]], dtype=np.float32)
+    pt, debug_img, mask_img, meta = det.detect_debug(img, display_quad=quad)
+
+    print(f"Detected circular dot: {pt}")
+    print(f"Circularity: {meta['circularity']:.2f}, Aspect: {meta['aspect_ratio']:.2f}")
+    assert pt is not None, "Failed to detect dot"
+    assert abs(pt[0] - 300) < 2 and abs(pt[1] - 200) < 2, f"Wrong point: {pt}"
+    print("Circular dot detection and DocScanner boundary test passed!")

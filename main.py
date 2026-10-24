@@ -167,6 +167,7 @@ def main():
     # 4. Setup Coordinate Transformer, IR Detector, and Whiteboard Canvas
     print("[Main] Initializing coordinate transformer & detector...")
     transformer = CoordinateTransformer(homography_matrix)
+    display_quad = transformer.get_display_quad()
     detector = IRDetector(threshold=args.threshold)
 
     print("[Main] Launching Whiteboard canvas...")
@@ -175,9 +176,9 @@ def main():
 
     # 5. Main Event & Tracking Loop
     print("\n[Main] Smart Notebook is active!")
-    print(" - Press the IR pen button to draw on screen.")
-    print(" - Release the IR pen button to lift the pen.")
-    print(" - Hover over ERASER or SAVE buttons in the bottom-right for 0.5s to trigger.")
+    print(" - Press the IR pen button / remote control to draw on screen.")
+    print(" - Release the button to lift the pen.")
+    print(" - Tap or blink light on ERASER or SAVE buttons to trigger.")
     print(" - Press [TAB] or [D] to toggle between Production and Testing modes.")
     print(" - Press [ESC] on keyboard to exit.\n")
 
@@ -187,8 +188,10 @@ def main():
             frame = camera.capture_frame()
 
             if whiteboard.dev_mode:
-                # Testing / Development Mode: full OpenCV diagnostics and telemetry
-                cam_point, debug_frame, thresh_rgb, metadata = detector.detect_debug(frame)
+                # Testing / Development Mode: full OpenCV diagnostics and DocScanner quad
+                cam_point, debug_frame, thresh_rgb, metadata = detector.detect_debug(
+                    frame, display_quad=display_quad
+                )
                 screen_point = transformer.transform(cam_point) if cam_point is not None else None
                 whiteboard.update_dev_overlay(
                     annotated_frame=debug_frame,
@@ -197,8 +200,8 @@ def main():
                     screen_point=screen_point
                 )
             else:
-                # Production Mode: streamlined high-speed detection
-                cam_point = detector.detect(frame)
+                # Production Mode: streamlined high-speed circular dot detection in display quad
+                cam_point = detector.detect(frame, display_quad=display_quad)
                 screen_point = transformer.transform(cam_point) if cam_point is not None else None
 
             if screen_point is not None:

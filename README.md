@@ -104,10 +104,14 @@ Enter mode [1-2] or press [Enter] for default (production):
 
 - **Production Mode**: Clean fullscreen whiteboard canvas with no UI clutter. Direct IR drawing experience with automatic pen lift and anti-spike line filtering.
 - **Testing / Development Mode**: Dedicated OpenCV test bench (does not draw all over your screen):
-  1. **Large Live Camera Feed (540x405)**: Real-time camera view with precision green reticle tracking the IR LED / remote light, while excluding ambient ceiling glare.
+  1. **Large Live Camera Feed (540x405)**: Real-time camera view showing the **DocScanner Display Boundary Quadrilateral** (the 4 edges and corners of the monitor outlined in neon cyan/green) and precision reticle tracking circular IR dots inside the display area.
   2. **Large OpenCV Threshold Mask (540x405)**: Binary mask showing exactly what pixels pass the active brightness threshold.
-  3. **Diagnostics & Telemetry**: Real-time FPS, camera coordinates `(cx, cy)`, screen coordinates `(sx, sy)`, peak brightness (240-255), and blob area.
-  4. **Interactive Test Drawing Pad**: Dedicated preview pad where you can test strokes and verify button tapping without affecting the whiteboard.
+  3. **Diagnostics & Telemetry**: Real-time FPS, DocScanner quadrilateral status, dot circularity & aspect ratio, camera coordinates `(cx, cy)`, screen coordinates `(sx, sy)`, peak brightness (240-255), and blob area.
+  4. **Interactive Test Drawing Pad**: Dedicated preview pad where you can test strokes, pulsating/blinking remote lights, and button tapping in real time.
+- **DocScanner Display Area & Dot Drawing**:
+  - The camera calculates the 4 corners of the display just like a document scanner app (CamScanner / DocScanner).
+  - Any light detected outside the display boundary is automatically ignored.
+  - Whenever circular IR light turns on inside the display area (even if pulsating or blinking), it immediately draws a dot at that exact position. Smooth strokes connect naturally as you move.
 - **Command-Line Selection**:
   ```bash
   # Start directly in Testing / Dev Bench:

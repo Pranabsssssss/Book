@@ -43,9 +43,10 @@
 
 | Feature | Description |
 |---|---|
-| **Calibration** | Camera-to-display coordinate mapping using 5 calibration dots |
-| **Production Mode** | Clean fullscreen whiteboard canvas with white pen on black background |
-| **Testing / Dev Mode** | Dedicated OpenCV testing bench: large live camera feed, threshold mask, telemetry, and test pad |
+| **Calibration** | Camera-to-display DocScanner-style boundary quad mapping via homography |
+| **Production Mode** | Clean fullscreen whiteboard canvas stamping dots wherever light turns on inside display quad |
+| **Testing / Dev Mode** | Dedicated OpenCV test bench showing DocScanner screen quad, circular dot detection, and test pad |
+| **Circular Dot Filter** | Exclusively calculates circular dots/circles (IR LED); rejects strips and ambient glare |
 | **Eraser** | On-screen button zone — blink/tap IR light to toggle eraser mode |
 | **Save** | On-screen button zone — blink/tap IR light to save canvas as PNG |
 | **Anti-Spike Filter** | Prevents spurious teleport lines across the screen when pen moves while off |
