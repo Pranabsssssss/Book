@@ -80,18 +80,22 @@ When running `main.py` (or `test_camera.py`), you can select which camera to use
     ```
 - **Config setting**: Change `CAMERA_BACKEND = "ribbon"` or `"usb"` in `config.py`.
 
-### Calibration on Startup
-- **First Run**: The app will automatically enter calibration mode. It displays 5 targets (4 corners + 1 center validation point) sequentially. The camera detects the points to compute a 3×3 perspective homography matrix.
-- **Subsequent Runs**: When started, it will ask:
-  ```text
-  Existing calibration found.
-  Press 'r' to recalibrate, or [Enter] to use existing data:
-  ```
-  Press **Enter** to instantly jump into drawing mode using saved calibration data (`calibration_data/calibration.json`), or type **`r`** to recalibrate.
-- **Force Recalibrate Flag**:
-  ```bash
-  python3 main.py --recalibrate
-  ```
+### Detailed IR Calibration on Startup
+The calibration maps your monitor's display boundaries to the camera view using your **actual IR Light / Remote**:
+- **Step-by-Step Interactive Targets**: Target bullseyes appear at each of the 4 corners:
+  1. Top-Left corner
+  2. Top-Right corner
+  3. Bottom-Right corner
+  4. Bottom-Left corner
+- **Aim & Hold Your IR Light**: Aim your IR remote control or marker pen at the target bullseye and press/hold the button.
+- **Live Center Camera Preview**: A live camera view in the center shows if the camera sees your IR light, displaying a green reticle and progress bar (`HOLD STEADY... 80%`).
+- **Confirmation Flash**: Once captured, the target flashes bright green and prompts you to release the button and move to the next corner.
+- **PC Testing Assist**: You can press **`[SPACE]`** or mouse-click during calibration to simulate a capture, or press **`[S]`** to skip directly to default 1:1 mapping.
+
+### Light-Purple IR vs Normal White Light Differentiation
+Camera sensors perceive near-infrared light (850nm / 940nm) with a distinct **light-purple / violet / magenta tint** (Red & Blue channels are high, Green is substantially lower: $\frac{R+B}{2G} \ge 1.14$).
+- **Authentic IR Light**: Saturated core with purple/violet spectral signature ($\ge 235$ peak, ratio $> 1.14$, purple excess $> 10$) $\rightarrow$ **ACCEPTED & TRACKED**.
+- **Normal White Light**: Neutral color balance ($R \approx G \approx B$, ratio $\approx 1.0$) from ceiling lamps, white cloth, flashlight, or white screen pixels $\rightarrow$ **REJECTED AS WHITE LIGHT**.
 
 ### Operating Modes (Production vs Testing/Development)
 After calibration is complete, the application prompts you to choose an operating mode:

@@ -37,7 +37,13 @@ CAMERA_EDGE_MARGIN_SIDE = 10
 # Brightness threshold (0-255). Values above this are considered bright IR/white light.
 # Remote LEDs and IR pens have peak brightness ~245-255.
 IR_THRESHOLD = 240
-CALIBRATION_IR_THRESHOLD = 200
+CALIBRATION_IR_THRESHOLD = 210
+
+# IR Spectral Differentiation:
+# Digital camera sensors see near-IR (850-940nm) with a distinct light-purple/violet tint
+# (Red & Blue high, Green significantly lower). Normal white light has R ~ G ~ B.
+IR_SPECTRAL_RATIO_MIN = 1.14   # (R + B) / (2 * max(G, 1)) must exceed this to qualify as IR
+IR_PURPLE_EXCESS_MIN = 10.0    # R + B - 2*G must exceed this
 
 # Minimum and maximum contour areas in pixels.
 # An IR LED / remote light tip is compact (typically 3 - 150 px).

@@ -187,27 +187,32 @@ def main():
             # Capture camera frame
             frame = camera.capture_frame()
 
+            # Detect authentic circular IR light and calculate DocScanner quad containment
+            cam_point, debug_frame, thresh_rgb, metadata = detector.detect_debug(
+                frame, display_quad=display_quad
+            )
+            screen_point = transformer.transform(cam_point) if cam_point is not None else None
+
             if whiteboard.dev_mode:
-                # Testing / Development Mode: full OpenCV diagnostics and DocScanner quad
-                cam_point, debug_frame, thresh_rgb, metadata = detector.detect_debug(
-                    frame, display_quad=display_quad
-                )
-                screen_point = transformer.transform(cam_point) if cam_point is not None else None
+                # Testing / Development Mode: full OpenCV diagnostics and live test pad
                 whiteboard.update_dev_overlay(
                     annotated_frame=debug_frame,
                     thresh_mask=thresh_rgb,
                     info=metadata,
                     screen_point=screen_point
                 )
+                # In Dev Mode, always send point to test pad so user sees their LED drawing!
+                if screen_point is not None:
+                    whiteboard.handle_point(screen_point)
+                else:
+                    whiteboard.handle_no_point()
             else:
-                # Production Mode: streamlined high-speed circular dot detection in display quad
-                cam_point = detector.detect(frame, display_quad=display_quad)
-                screen_point = transformer.transform(cam_point) if cam_point is not None else None
-
-            if screen_point is not None:
-                whiteboard.handle_point(screen_point)
-            else:
-                whiteboard.handle_no_point()
+                # Production Mode: only draw if inside the calibrated display quad
+                in_bounds = metadata.get("in_display_area", True)
+                if screen_point is not None and in_bounds:
+                    whiteboard.handle_point(screen_point)
+                else:
+                    whiteboard.handle_no_point()
 
             # Dynamic threshold tuning via dev mode hotkeys '[' and ']'
             if whiteboard.threshold_delta != 0:

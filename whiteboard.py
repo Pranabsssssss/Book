@@ -189,12 +189,12 @@ class Whiteboard:
 
     def _handle_dev_test_pad_point(self, pt, color, radius):
         """Draw on the mini test pad inside Development Mode."""
-        t_x = int(pt[0] * (self.dev_test_pad_w / SCREEN_WIDTH))
-        t_y = int(pt[1] * (self.dev_test_pad_h / SCREEN_HEIGHT))
+        t_x = max(0, min(self.dev_test_pad_w - 1, int(pt[0] * (self.dev_test_pad_w / SCREEN_WIDTH))))
+        t_y = max(0, min(self.dev_test_pad_h - 1, int(pt[1] * (self.dev_test_pad_h / SCREEN_HEIGHT))))
         pad_pt = (t_x, t_y)
-        pad_radius = max(2, radius // 2)
+        pad_radius = max(4, radius)
 
-        # Stamp dot on test pad
+        # Stamp visible dot on test pad
         pygame.draw.circle(self.dev_test_pad, color, pad_pt, pad_radius)
 
         if self.dev_prev_point is not None:

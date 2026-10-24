@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-from config import SCREEN_WIDTH, SCREEN_HEIGHT
+from config import SCREEN_WIDTH, SCREEN_HEIGHT, CAMERA_WIDTH, CAMERA_HEIGHT
 
 
 class CoordinateTransformer:
@@ -29,8 +29,28 @@ class CoordinateTransformer:
             [[0.0, float(SCREEN_HEIGHT)]]
         ], dtype=np.float64)
 
-        cam_corners = cv2.perspectiveTransform(screen_corners, self.H_inv)
-        self.display_quad = cam_corners.reshape(4, 2)
+        try:
+            cam_corners = cv2.perspectiveTransform(screen_corners, self.H_inv)
+            quad = cam_corners.reshape(4, 2)
+            # Validate that the computed quad has sensible area
+            quad_area = cv2.contourArea(quad.astype(np.float32))
+            if quad_area > 5000:
+                self.display_quad = quad
+            else:
+                # Fallback to full camera view if quad is collapsed
+                self.display_quad = np.array([
+                    [0.0, 0.0],
+                    [float(CAMERA_WIDTH), 0.0],
+                    [float(CAMERA_WIDTH), float(CAMERA_HEIGHT)],
+                    [0.0, float(CAMERA_HEIGHT)]
+                ], dtype=np.float64)
+        except Exception:
+            self.display_quad = np.array([
+                [0.0, 0.0],
+                [float(CAMERA_WIDTH), 0.0],
+                [float(CAMERA_WIDTH), float(CAMERA_HEIGHT)],
+                [0.0, float(CAMERA_HEIGHT)]
+            ], dtype=np.float64)
 
     def get_display_quad(self) -> np.ndarray:
         """
@@ -45,7 +65,6 @@ class CoordinateTransformer:
         (like DocScanner bounding paper edges).
         """
         poly = self.display_quad.astype(np.float32)
-        # Returns >= 0 if inside or on edge, -1 if outside
         res = cv2.pointPolygonTest(poly, (float(cam_x), float(cam_y)), False)
         return res >= 0
 
@@ -63,7 +82,10 @@ class CoordinateTransformer:
 
         denom = self.H[2, 0] * cx + self.H[2, 1] * cy + self.H[2, 2]
         if abs(denom) < 1e-9:
-            return (0.0, 0.0)
+            # Fallback linear scale to screen size
+            sx = (cx / float(CAMERA_WIDTH)) * float(SCREEN_WIDTH)
+            sy = (cy / float(CAMERA_HEIGHT)) * float(SCREEN_HEIGHT)
+            return (float(sx), float(sy))
 
         sx = (self.H[0, 0] * cx + self.H[0, 1] * cy + self.H[0, 2]) / denom
         sy = (self.H[1, 0] * cx + self.H[1, 1] * cy + self.H[1, 2]) / denom
@@ -80,11 +102,11 @@ class CoordinateTransformer:
 
 
 if __name__ == "__main__":
-    print("Testing CoordinateTransformer with DocScanner quad...")
+    print("Testing CoordinateTransformer with fallback protection...")
     ident = np.eye(3, dtype=np.float64)
     tx = CoordinateTransformer(ident)
     quad = tx.get_display_quad()
-    print("Identity Display Quad:\n", quad)
+    print("Display Quad:\n", quad)
     assert quad.shape == (4, 2), "Quad shape mismatch"
-    assert tx.is_point_in_display_area(100, 100), "Point inside failed"
+    assert tx.is_point_in_display_area(320, 240), "Center point test failed"
     print("CoordinateTransformer tests passed successfully!")

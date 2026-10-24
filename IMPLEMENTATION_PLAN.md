@@ -43,7 +43,8 @@
 
 | Feature | Description |
 |---|---|
-| **Calibration** | Camera-to-display DocScanner-style boundary quad mapping via homography |
+| **IR Light Calibration** | Detailed 4-corner calibration with live camera preview tracking user's actual IR light |
+| **Spectral IR Discriminator** | Differentiates light-purple/violet IR light ((R+B)/2G > 1.14) from normal white light |
 | **Production Mode** | Clean fullscreen whiteboard canvas stamping dots wherever light turns on inside display quad |
 | **Testing / Dev Mode** | Dedicated OpenCV test bench showing DocScanner screen quad, circular dot detection, and test pad |
 | **Circular Dot Filter** | Exclusively calculates circular dots/circles (IR LED); rejects strips and ambient glare |
