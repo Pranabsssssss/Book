@@ -44,7 +44,8 @@
 | Feature | Description |
 |---|---|
 | **Calibration** | Camera-to-display coordinate mapping using 5 calibration dots |
-| **Drawing** | White pen (5-8px) on full-black canvas via IR pen |
+| **Production Mode** | Clean fullscreen whiteboard canvas with white pen on black background |
+| **Testing / Dev Mode** | Simultaneous whiteboard + live camera tracking feed, OpenCV threshold mask, and telemetry HUD |
 | **Eraser** | On-screen button zone — point IR pen at it to toggle eraser mode |
 | **Save** | On-screen button zone — point IR pen at it to save canvas as PNG |
 | **Persistence** | Calibration data saved to JSON, reusable across sessions |

@@ -93,6 +93,32 @@ When running `main.py` (or `test_camera.py`), you can select which camera to use
   python3 main.py --recalibrate
   ```
 
+### Operating Modes (Production vs Testing/Development)
+After calibration is complete, the application prompts you to choose an operating mode:
+```text
+Select Operating Mode:
+  [1] Production Mode (Clean fullscreen whiteboard canvas)
+  [2] Testing / Development Mode (Live camera, OpenCV threshold & tracking HUD)
+Enter mode [1-2] or press [Enter] for default (production):
+```
+
+- **Production Mode**: Clean fullscreen whiteboard canvas with no UI clutter. Direct IR drawing experience.
+- **Testing / Development Mode**: Displays the whiteboard alongside:
+  1. **Live Camera Feed**: Real-time camera view with detected IR green target reticles and coordinates.
+  2. **OpenCV Threshold Mask**: Binary black/white view showing exactly what pixels pass the IR brightness threshold.
+  3. **Telemetry & Controls HUD**: Real-time FPS, camera coordinates, transformed screen coordinates, blob area, action state, and active threshold.
+  4. **Screen Tracking Reticle**: Visual crosshair showing where the camera is projecting the pen onto the display in real time.
+- **Command-Line Selection**:
+  ```bash
+  # Start directly in Testing / Dev Mode:
+  python3 main.py --mode dev
+
+  # Start directly in Production Mode:
+  python3 main.py --mode prod
+  ```
+- **Runtime Mode Toggle**: Press **`TAB`** or **`D`** on your keyboard anytime while the app is running to switch between Production and Testing modes instantly!
+- **Dynamic Threshold Tuning**: Press **`[`** to decrease or **`]`** to increase the IR detection threshold live in response to ambient lighting.
+
 ---
 
 ## ✏️ Controls & Features
@@ -104,6 +130,8 @@ When running `main.py` (or `test_camera.py`), you can select which camera to use
 | **Toggle Eraser Mode** | Hover IR pen over the **ERASER** button (bottom-right) for **0.5s** (dwell), or press **`E`** on keyboard. |
 | **Save Drawing (PNG)** | Hover IR pen over the **SAVE** button (bottom-right) for **0.5s** (dwell), or press **`S`** on keyboard. Files are saved in `saves/`. |
 | **Clear Canvas** | Press **`C`** on keyboard. |
+| **Toggle Dev / Prod Mode** | Press **`TAB`** or **`D`** on keyboard. |
+| **Adjust IR Threshold Live** | Press **`[`** (lower threshold) or **`]`** (raise threshold). |
 | **Exit Application** | Press **`ESC`** on keyboard. |
 
 ---

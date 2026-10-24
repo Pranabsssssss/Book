@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+import cv2
 
 try:
     import pygame
@@ -12,7 +13,8 @@ from config import (
     PEN_COLOR, PEN_RADIUS, ERASER_RADIUS,
     PEN_LIFT_TIMEOUT,
     ERASER_BUTTON_RECT, SAVE_BUTTON_RECT,
-    BUTTON_DWELL_FRAMES, SAVE_DIR
+    BUTTON_DWELL_FRAMES, SAVE_DIR,
+    DEV_OVERLAY_WIDTH, DEV_OVERLAY_HEIGHT
 )
 
 
@@ -20,9 +22,9 @@ class Whiteboard:
     """
     Interactive full-screen Pygame whiteboard application.
     Supports continuous drawing, eraser mode, dwell-based IR button triggers,
-    keyboard shortcuts, and PNG export.
+    keyboard shortcuts, PNG export, and dual Production / Testing modes.
     """
-    def __init__(self, screen=None):
+    def __init__(self, screen=None, dev_mode=False):
         if pygame is None:
             raise RuntimeError(
                 "Pygame is required for the Whiteboard canvas. "
@@ -50,16 +52,55 @@ class Whiteboard:
         self.last_point_time = 0.0
         self.quit_requested = False
 
+        # Operating Mode (Production vs Testing/Development)
+        self.dev_mode = dev_mode
+        self.threshold_delta = 0
+        self.current_threshold = 245
+        self.current_screen_point = None
+
+        # Dev Overlay cache
+        self.dev_frame_surf = None
+        self.dev_thresh_surf = None
+        self.dev_info = {}
+
         # Dwell progress counters
         self.eraser_dwell = 0
         self.save_dwell = 0
 
         # Visual feedback notification banner (text, expiry timestamp)
-        self.notification = ("Ready", time.time() + 2.0)
+        mode_label = "TESTING / DEV MODE" if self.dev_mode else "PRODUCTION MODE"
+        self.notification = (mode_label, time.time() + 2.5)
 
         # Fonts
         self.font_btn = pygame.font.SysFont("Arial", 22, bold=True)
         self.font_status = pygame.font.SysFont("Arial", 18)
+        self.font_hud_title = pygame.font.SysFont("Arial", 16, bold=True)
+        self.font_hud_val = pygame.font.SysFont("Consolas", 15)
+
+    def set_current_threshold(self, thresh: int):
+        self.current_threshold = thresh
+
+    def update_dev_overlay(self, annotated_frame=None, thresh_mask=None, info=None, screen_point=None):
+        """
+        Receive live OpenCV diagnostic imagery and metadata for development rendering.
+        """
+        if not self.dev_mode:
+            return
+
+        self.current_screen_point = screen_point
+        self.dev_info = info or {}
+
+        if annotated_frame is not None:
+            resized_cam = cv2.resize(annotated_frame, (DEV_OVERLAY_WIDTH, DEV_OVERLAY_HEIGHT))
+            self.dev_frame_surf = pygame.image.frombuffer(
+                resized_cam.tobytes(), (DEV_OVERLAY_WIDTH, DEV_OVERLAY_HEIGHT), 'RGB'
+            )
+
+        if thresh_mask is not None:
+            resized_thresh = cv2.resize(thresh_mask, (DEV_OVERLAY_WIDTH, DEV_OVERLAY_HEIGHT))
+            self.dev_thresh_surf = pygame.image.frombuffer(
+                resized_thresh.tobytes(), (DEV_OVERLAY_WIDTH, DEV_OVERLAY_HEIGHT), 'RGB'
+            )
 
     def handle_point(self, screen_point: tuple):
         """
@@ -70,6 +111,7 @@ class Whiteboard:
         px = max(0, min(SCREEN_WIDTH - 1, int(screen_point[0])))
         py = max(0, min(SCREEN_HEIGHT - 1, int(screen_point[1])))
         pt = (px, py)
+        self.current_screen_point = pt
 
         # 1. Check Eraser Button Zone
         if self._point_in_rect(pt, ERASER_BUTTON_RECT):
@@ -121,6 +163,7 @@ class Whiteboard:
         """
         Invoked when no IR light is detected in the current frame (pen button released).
         """
+        self.current_screen_point = None
         # If pen has been absent longer than grace period, break stroke continuity
         if time.time() - self.last_point_time > PEN_LIFT_TIMEOUT:
             self.prev_point = None
@@ -147,6 +190,16 @@ class Whiteboard:
                     self.save_canvas()
                 elif event.key == pygame.K_c:
                     self.clear_canvas()
+                elif event.key in (pygame.K_TAB, pygame.K_d):
+                    # Toggle between Production and Development / Testing Mode
+                    self.dev_mode = not self.dev_mode
+                    label = "Mode: TESTING / DEV" if self.dev_mode else "Mode: PRODUCTION (Clean)"
+                    self.notification = (label, time.time() + 2.0)
+                    print(f"[Whiteboard] Switched to {label}")
+                elif event.key in (pygame.K_LEFTBRACKET, pygame.K_MINUS):
+                    self.threshold_delta -= 2
+                elif event.key in (pygame.K_RIGHTBRACKET, pygame.K_EQUALS, pygame.K_PLUS):
+                    self.threshold_delta += 2
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 # Mouse click support for PC testing
                 self.handle_point(event.pos)
@@ -158,12 +211,90 @@ class Whiteboard:
         # Blit canvas to screen
         self.screen.blit(self.canvas, (0, 0))
 
+        # In Dev Mode: render OpenCV camera feeds, threshold mask, and telemetry HUD
+        if self.dev_mode:
+            self._render_dev_hud()
+
         # Overlay UI buttons and status widgets
         self._render_buttons()
         self._render_status()
 
         pygame.display.flip()
         self.clock.tick(30)
+
+    def _render_dev_hud(self):
+        """Render Live Camera, Threshold Mask, and Telemetry cards for Development / Testing."""
+        top_y = 20
+        box_w = DEV_OVERLAY_WIDTH
+        box_h = DEV_OVERLAY_HEIGHT
+
+        # 1. Camera Tracking Card
+        x_cam = 20
+        pygame.draw.rect(self.screen, (20, 20, 20), (x_cam - 4, top_y - 4, box_w + 8, box_h + 32), border_radius=6)
+        pygame.draw.rect(self.screen, (0, 200, 255), (x_cam - 4, top_y - 4, box_w + 8, box_h + 32), 2, border_radius=6)
+        title_cam = self.font_hud_title.render("LIVE CAMERA (Tracking)", True, (0, 220, 255))
+        self.screen.blit(title_cam, (x_cam + 4, top_y))
+        if self.dev_frame_surf:
+            self.screen.blit(self.dev_frame_surf, (x_cam, top_y + 24))
+
+        # 2. Threshold Mask Card
+        x_thresh = x_cam + box_w + 16
+        pygame.draw.rect(self.screen, (20, 20, 20), (x_thresh - 4, top_y - 4, box_w + 8, box_h + 32), border_radius=6)
+        pygame.draw.rect(self.screen, (255, 180, 0), (x_thresh - 4, top_y - 4, box_w + 8, box_h + 32), 2, border_radius=6)
+        title_thresh = self.font_hud_title.render("OPENCV THRESHOLD MASK", True, (255, 190, 20))
+        self.screen.blit(title_thresh, (x_thresh + 4, top_y))
+        if self.dev_thresh_surf:
+            self.screen.blit(self.dev_thresh_surf, (x_thresh, top_y + 24))
+
+        # 3. Telemetry & Stats Card
+        x_info = x_thresh + box_w + 16
+        info_w = 360
+        pygame.draw.rect(self.screen, (15, 15, 20), (x_info, top_y - 4, info_w, box_h + 32), border_radius=6)
+        pygame.draw.rect(self.screen, (80, 220, 100), (x_info, top_y - 4, info_w, box_h + 32), 2, border_radius=6)
+
+        title_info = self.font_hud_title.render("OPENCV TELEMETRY & CONTROLS", True, (100, 255, 120))
+        self.screen.blit(title_info, (x_info + 10, top_y))
+
+        fps = self.clock.get_fps()
+        cam_pt = self.dev_info.get("point")
+        cam_str = f"({cam_pt[0]:.1f}, {cam_pt[1]:.1f})" if cam_pt else "None"
+        scr_str = f"({self.current_screen_point[0]}, {self.current_screen_point[1]})" if self.current_screen_point else "None"
+        area_val = self.dev_info.get("area", 0.0)
+        status = self.dev_info.get("status", "SEARCHING")
+
+        action_str = "PEN UP (LIFTED)"
+        if self.current_screen_point:
+            if self._point_in_rect(self.current_screen_point, ERASER_BUTTON_RECT):
+                action_str = f"DWELLING (ERASER) [{self.eraser_dwell}/{BUTTON_DWELL_FRAMES}]"
+            elif self._point_in_rect(self.current_screen_point, SAVE_BUTTON_RECT):
+                action_str = f"DWELLING (SAVE) [{self.save_dwell}/{BUTTON_DWELL_FRAMES}]"
+            elif self.eraser_mode:
+                action_str = "ERASING"
+            else:
+                action_str = "DRAWING"
+
+        lines = [
+            f"Mode      : TESTING / DEV ([TAB] toggles)",
+            f"FPS       : {fps:.1f}",
+            f"Threshold : {self.current_threshold} (Press [ / ] to tune)",
+            f"Status    : {status}",
+            f"Action    : {action_str}",
+            f"Camera Pt : {cam_str}",
+            f"Screen Pt : {scr_str}",
+            f"Blob Area : {area_val:.1f} px",
+        ]
+
+        text_y = top_y + 26
+        for line in lines:
+            rendered_line = self.font_hud_val.render(line, True, (210, 210, 210))
+            self.screen.blit(rendered_line, (x_info + 12, text_y))
+            text_y += 20
+
+        # Draw visual screen reticle at current tracking position
+        if self.current_screen_point:
+            sx, sy = self.current_screen_point
+            pygame.draw.circle(self.screen, (0, 255, 255), (sx, sy), 10, 2)
+            pygame.draw.circle(self.screen, (0, 255, 255), (sx, sy), 2)
 
     def save_canvas(self):
         """Save the current drawing to a timestamped PNG file."""
@@ -234,13 +365,14 @@ class Whiteboard:
         msg, expiry = self.notification
         if now < expiry:
             txt_surf = self.font_status.render(msg, True, (240, 240, 240))
-            bg_rect = pygame.Rect(20, 20, txt_surf.get_width() + 20, txt_surf.get_height() + 10)
+            bg_rect = pygame.Rect(20, SCREEN_HEIGHT - 75, txt_surf.get_width() + 20, txt_surf.get_height() + 10)
             pygame.draw.rect(self.screen, (40, 40, 40), bg_rect, border_radius=4)
             pygame.draw.rect(self.screen, (90, 90, 90), bg_rect, 1, border_radius=4)
-            self.screen.blit(txt_surf, (30, 25))
+            self.screen.blit(txt_surf, (30, SCREEN_HEIGHT - 70))
 
         # Bottom help text
-        help_surf = self.font_status.render("[ESC] Quit   [E] Toggle Eraser   [S] Save   [C] Clear", True, (90, 90, 90))
+        help_text = "[ESC] Quit   [TAB/D] Mode Toggle   [E] Eraser   [S] Save   [C] Clear   [[ / ]] Tune Thresh"
+        help_surf = self.font_status.render(help_text, True, (100, 100, 100))
         self.screen.blit(help_surf, (20, SCREEN_HEIGHT - 35))
 
     @staticmethod
@@ -266,7 +398,6 @@ class Whiteboard:
 
 if __name__ == "__main__":
     print("Testing Whiteboard module standalone (windowed mode for test)...")
-    # Run in small windowed mode for quick sanity check
     wb = Whiteboard()
     print("Whiteboard initialized successfully.")
     wb.cleanup()

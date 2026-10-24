@@ -1,5 +1,12 @@
 import os
 
+# === Application Operating Mode ===
+# "production" - Clean fullscreen whiteboard canvas
+# "testing"    - Whiteboard with live camera feed, OpenCV threshold mask, and IR telemetry HUD
+DEFAULT_MODE = "production"
+DEV_OVERLAY_WIDTH = 260
+DEV_OVERLAY_HEIGHT = 195
+
 # === Display Configuration ===
 # Default target is full HD 1080p HDMI monitor
 SCREEN_WIDTH = 1920

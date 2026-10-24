@@ -2,13 +2,14 @@
 """
 Smart Notebook - Main Application Entry Point
 Hardware: Raspberry Pi 3B+ (or Windows/Linux PC) with OV5647 IR Camera / Webcam & HDMI Monitor
+Supports Production (clean whiteboard) and Testing/Development (live OpenCV camera & HUD) modes.
 """
 
 import sys
 import argparse
 import traceback
 
-from config import IR_THRESHOLD, CAMERA_BACKEND, CAMERA_DEVICE_INDEX
+from config import IR_THRESHOLD, CAMERA_BACKEND, CAMERA_DEVICE_INDEX, DEFAULT_MODE
 from camera import Camera, normalize_backend
 from detector import IRDetector
 from transformer import CoordinateTransformer
@@ -30,6 +31,13 @@ def parse_args():
         type=int,
         default=CAMERA_DEVICE_INDEX,
         help=f"Camera device index for USB/OpenCV webcam (default: {CAMERA_DEVICE_INDEX})"
+    )
+    parser.add_argument(
+        "-m", "--mode",
+        type=str,
+        default=None,
+        choices=["production", "testing", "prod", "test", "dev", "development"],
+        help="Operating mode: 'production' (clean whiteboard) or 'testing' (live OpenCV camera & HUD)"
     )
     parser.add_argument(
         "-r", "--recalibrate",
@@ -68,6 +76,31 @@ def select_camera_backend(cli_camera_arg: str) -> str:
         return "auto"
     else:
         return normalize_backend(CAMERA_BACKEND)
+
+
+def select_operating_mode(cli_mode_arg: str) -> str:
+    """Prompt user for Production vs Testing / Development mode if not specified on CLI."""
+    if cli_mode_arg is not None:
+        m = cli_mode_arg.strip().lower()
+        if m in ("testing", "test", "dev", "development", "2"):
+            return "testing"
+        return "production"
+
+    print("\n" + "=" * 60)
+    print("Select Operating Mode:")
+    print("  [1] Production Mode (Clean fullscreen whiteboard canvas)")
+    print("  [2] Testing / Development Mode (Live camera, OpenCV threshold & tracking HUD)")
+    print("=" * 60)
+
+    try:
+        choice = input(f"Enter mode [1-2] or press [Enter] for default ({DEFAULT_MODE}): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        choice = ""
+
+    if choice in ("2", "test", "testing", "dev", "development"):
+        return "testing"
+    else:
+        return "production"
 
 
 def main():
@@ -126,19 +159,26 @@ def main():
         camera.stop()
         sys.exit(1)
 
-    # 3. Setup Coordinate Transformer, IR Detector, and Whiteboard Canvas
+    # 3. Select Operating Mode (Production vs Testing / Dev)
+    chosen_mode = select_operating_mode(args.mode)
+    is_dev = (chosen_mode == "testing")
+    print(f"[Main] Active mode: {'TESTING / DEVELOPMENT' if is_dev else 'PRODUCTION'}")
+
+    # 4. Setup Coordinate Transformer, IR Detector, and Whiteboard Canvas
     print("[Main] Initializing coordinate transformer & detector...")
     transformer = CoordinateTransformer(homography_matrix)
     detector = IRDetector(threshold=args.threshold)
 
     print("[Main] Launching Whiteboard canvas...")
-    whiteboard = Whiteboard()
+    whiteboard = Whiteboard(dev_mode=is_dev)
+    whiteboard.set_current_threshold(detector.threshold)
 
-    # 4. Main Event & Tracking Loop
+    # 5. Main Event & Tracking Loop
     print("\n[Main] Smart Notebook is active!")
     print(" - Press the IR pen button to draw on screen.")
     print(" - Release the IR pen button to lift the pen.")
     print(" - Hover over ERASER or SAVE buttons in the bottom-right for 0.5s to trigger.")
+    print(" - Press [TAB] or [D] to toggle between Production and Testing modes.")
     print(" - Press [ESC] on keyboard to exit.\n")
 
     try:
@@ -146,18 +186,34 @@ def main():
             # Capture camera frame
             frame = camera.capture_frame()
 
-            # Detect IR light / bright spot in camera space
-            cam_point = detector.detect(frame)
+            if whiteboard.dev_mode:
+                # Testing / Development Mode: full OpenCV diagnostics and telemetry
+                cam_point, debug_frame, thresh_rgb, metadata = detector.detect_debug(frame)
+                screen_point = transformer.transform(cam_point) if cam_point is not None else None
+                whiteboard.update_dev_overlay(
+                    annotated_frame=debug_frame,
+                    thresh_mask=thresh_rgb,
+                    info=metadata,
+                    screen_point=screen_point
+                )
+            else:
+                # Production Mode: streamlined high-speed detection
+                cam_point = detector.detect(frame)
+                screen_point = transformer.transform(cam_point) if cam_point is not None else None
 
-            if cam_point is not None:
-                # Transform camera coordinates to screen pixel coordinates
-                screen_point = transformer.transform(cam_point)
+            if screen_point is not None:
                 whiteboard.handle_point(screen_point)
             else:
-                # Pen is off / lifted
                 whiteboard.handle_no_point()
 
-            # Render canvas, button overlays, and process window events
+            # Dynamic threshold tuning via dev mode hotkeys '[' and ']'
+            if whiteboard.threshold_delta != 0:
+                detector.threshold = max(50, min(255, detector.threshold + whiteboard.threshold_delta))
+                whiteboard.threshold_delta = 0
+                whiteboard.set_current_threshold(detector.threshold)
+                print(f"[Main] Adjusted IR threshold to: {detector.threshold}")
+
+            # Render canvas, button overlays, dev HUD, and process window events
             whiteboard.render()
 
     except KeyboardInterrupt:
