@@ -1,0 +1,11 @@
+# Core dependencies for Smart Notebook
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pygame>=2.5.0
+
+# Note on Raspberry Pi camera support:
+# 'picamera2' is pre-installed with the system Python on Raspberry Pi OS 64-bit.
+# If you are using a virtual environment on the Pi, create it with access to system packages:
+#   python3 -m venv venv --system-site-packages
+#   source venv/bin/activate
+#   pip install -r requirements.txt
