@@ -8,11 +8,15 @@ class CoordinateTransformer:
     Transforms coordinates between camera space and screen space using
     a perspective homography matrix computed during calibration.
     Also calculates the DocScanner-style display boundary quadrilateral in camera view.
+    Adapts dynamically to any display screen resolution.
     """
-    def __init__(self, homography_matrix: np.ndarray):
+    def __init__(self, homography_matrix: np.ndarray, screen_width: int = None, screen_height: int = None):
         if homography_matrix is None or homography_matrix.shape != (3, 3):
             raise ValueError("Homography matrix must be a 3x3 numpy array.")
         self.H = np.asarray(homography_matrix, dtype=np.float64)
+
+        self.screen_width = int(screen_width) if screen_width else SCREEN_WIDTH
+        self.screen_height = int(screen_height) if screen_height else SCREEN_HEIGHT
 
         # Compute inverse homography to map screen coordinates back into camera space
         try:
@@ -24,9 +28,9 @@ class CoordinateTransformer:
         # Order: [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
         screen_corners = np.array([
             [[0.0, 0.0]],
-            [[float(SCREEN_WIDTH), 0.0]],
-            [[float(SCREEN_WIDTH), float(SCREEN_HEIGHT)]],
-            [[0.0, float(SCREEN_HEIGHT)]]
+            [[float(self.screen_width), 0.0]],
+            [[float(self.screen_width), float(self.screen_height)]],
+            [[0.0, float(self.screen_height)]]
         ], dtype=np.float64)
 
         try:
@@ -82,9 +86,9 @@ class CoordinateTransformer:
 
         denom = self.H[2, 0] * cx + self.H[2, 1] * cy + self.H[2, 2]
         if abs(denom) < 1e-9:
-            # Fallback linear scale to screen size
-            sx = (cx / float(CAMERA_WIDTH)) * float(SCREEN_WIDTH)
-            sy = (cy / float(CAMERA_HEIGHT)) * float(SCREEN_HEIGHT)
+            # Fallback linear scale to current screen size
+            sx = (cx / float(CAMERA_WIDTH)) * float(self.screen_width)
+            sy = (cy / float(CAMERA_HEIGHT)) * float(self.screen_height)
             return (float(sx), float(sy))
 
         sx = (self.H[0, 0] * cx + self.H[0, 1] * cy + self.H[0, 2]) / denom

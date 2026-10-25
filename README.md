@@ -80,6 +80,18 @@ When running `main.py` (or `test_camera.py`), you can select which camera to use
     ```
 - **Config setting**: Change `CAMERA_BACKEND = "ribbon"` or `"usb"` in `config.py`.
 
+### Auto-Detect Native Display Resolution & Dynamic Sizing
+The system does **NOT** assume a fixed 1920×1080 display. It automatically measures and adapts to whatever display is connected:
+- **Universal Display Compatibility**: Supports 1366×768 (standard laptops), 1280×720 (720p monitors/TVs), 1920×1080 (1080p Full HD), 2560×1440 (2K QHD), 4K UHD, and Raspberry Pi touchscreens.
+- **Maximum Screen Canvas & Native Aspect Ratio**: The blackboard canvas and coordinate space dynamically expand to the full maximum resolution and exact aspect ratio of the connected display.
+- **Dynamic Calibration Targets**: Calibration points are automatically placed at the true edges and corners of the detected display resolution rather than off-screen fixed coordinates:
+  - Top-Left: `(margin_x, margin_y)`
+  - Top-Right: `(width - margin_x, margin_y)`
+  - Bottom-Right: `(width - margin_x, height - margin_y)`
+  - Bottom-Left: `(margin_x, height - margin_y)`
+  - Center: `(width // 2, height // 2)`
+- **Adaptive UI Controls**: On-screen ERASER and SAVE buttons are dynamically anchored to the bottom-right corner of the active display with proportional margins, guaranteeing they are always visible and accessible.
+
 ### Differential Dots Display Calibration & Live Edge Review
 The calibration maps your monitor's display boundaries to the camera view using automated **Differential Dots Calibration** (DocScanner Quad calculation):
 - **Automated Target Dots on Display Edges**: The monitor displays a full black screen, captures a baseline camera frame, and then flashes white calibration targets one by one at each corner:

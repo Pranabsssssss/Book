@@ -12,9 +12,9 @@ from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
     PEN_COLOR, PEN_RADIUS, ERASER_RADIUS,
     PEN_LIFT_TIMEOUT, MAX_STROKE_JUMP,
-    ERASER_BUTTON_RECT, SAVE_BUTTON_RECT,
     BUTTON_DWELL_FRAMES, SAVE_DIR,
-    DEV_CAMERA_WIDTH, DEV_CAMERA_HEIGHT
+    DEV_CAMERA_WIDTH, DEV_CAMERA_HEIGHT,
+    get_button_rects, get_display_resolution
 )
 
 
@@ -24,6 +24,7 @@ class Whiteboard:
     Draws circular dots and strokes wherever light turns on inside the calibrated display area.
     Supports continuous drawing, pulsating/blinking remote lights, eraser toggle,
     button blink/tap detection, and a dedicated DocScanner-style testing bench.
+    Dynamically adapts to any display resolution (1366x768, 1280x720, 1080p, 2K/4K).
     """
     def __init__(self, screen=None, dev_mode=False):
         if pygame is None:
@@ -36,16 +37,24 @@ class Whiteboard:
             pygame.init()
 
         if screen is None:
-            self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN)
+            # Auto-detect native resolution of current connected monitor
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             self.screen = screen
 
-        pygame.display.set_caption("Smart Notebook")
+        self.width = self.screen.get_width()
+        self.height = self.screen.get_height()
+        self.aspect_ratio = self.width / max(1, self.height)
+
+        pygame.display.set_caption(f"Smart Notebook ({self.width}x{self.height})")
         self.clock = pygame.time.Clock()
 
-        # Canvas surface holds the production artwork (saved on export)
-        self.canvas = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        # Canvas surface holds the production artwork at maximum native display resolution!
+        self.canvas = pygame.Surface((self.width, self.height))
         self.canvas.fill((0, 0, 0))
+
+        # Dynamic button zones for ERASER and SAVE anchored to bottom right of this screen
+        self.eraser_rect, self.save_rect = get_button_rects(self.width, self.height)
 
         # Test pad surface for Development Mode (dedicated drawing area)
         self.dev_test_pad_w = DEV_CAMERA_WIDTH
@@ -119,8 +128,8 @@ class Whiteboard:
         Also checks button hits (Save/Eraser).
         """
         now = time.time()
-        px = max(0, min(SCREEN_WIDTH - 1, int(screen_point[0])))
-        py = max(0, min(SCREEN_HEIGHT - 1, int(screen_point[1])))
+        px = max(0, min(self.width - 1, int(screen_point[0])))
+        py = max(0, min(self.height - 1, int(screen_point[1])))
         pt = (px, py)
         self.current_screen_point = pt
 
@@ -128,7 +137,7 @@ class Whiteboard:
         # 1. Check Button Zones (ERASER & SAVE)
         # When light hits or blinks on a button: trigger action and DO NOT draw!
         # -------------------------------------------------------------
-        if self._point_in_rect(pt, ERASER_BUTTON_RECT):
+        if self._point_in_rect(pt, self.eraser_rect):
             self.eraser_dwell += 1
             self.save_dwell = 0
             self.prev_point = None
@@ -143,7 +152,7 @@ class Whiteboard:
                 self.eraser_dwell = 0
             return
 
-        if self._point_in_rect(pt, SAVE_BUTTON_RECT):
+        if self._point_in_rect(pt, self.save_rect):
             self.save_dwell += 1
             self.eraser_dwell = 0
             self.prev_point = None
@@ -189,8 +198,8 @@ class Whiteboard:
 
     def _handle_dev_test_pad_point(self, pt, color, radius):
         """Draw on the mini test pad inside Development Mode."""
-        t_x = max(0, min(self.dev_test_pad_w - 1, int(pt[0] * (self.dev_test_pad_w / SCREEN_WIDTH))))
-        t_y = max(0, min(self.dev_test_pad_h - 1, int(pt[1] * (self.dev_test_pad_h / SCREEN_HEIGHT))))
+        t_x = max(0, min(self.dev_test_pad_w - 1, int(pt[0] * (self.dev_test_pad_w / self.width))))
+        t_y = max(0, min(self.dev_test_pad_h - 1, int(pt[1] * (self.dev_test_pad_h / self.height))))
         pad_pt = (t_x, t_y)
         pad_radius = max(4, radius)
 
@@ -274,47 +283,64 @@ class Whiteboard:
         """Dedicated Development Mode Screen with large OpenCV feeds and DocScanner bounds."""
         self.screen.fill((18, 22, 28))
 
-        # Top Header Bar
-        pygame.draw.rect(self.screen, (26, 32, 42), (0, 0, SCREEN_WIDTH, 56))
-        pygame.draw.line(self.screen, (40, 50, 68), (0, 56), (SCREEN_WIDTH, 56), 2)
+        # Top Header Bar across full native display width
+        pygame.draw.rect(self.screen, (26, 32, 42), (0, 0, self.width, 56))
+        pygame.draw.line(self.screen, (40, 50, 68), (0, 56), (self.width, 56), 2)
 
         title = self.font_title.render("SMART NOTEBOOK — OPENCV TESTING & LIGHTING BENCH", True, (240, 245, 255))
         self.screen.blit(title, (24, 14))
 
         badge_txt = self.font_btn.render("TESTING / DEV MODE", True, (60, 255, 100))
-        badge_rect = pygame.Rect(SCREEN_WIDTH - 260, 12, 230, 32)
+        badge_rect = pygame.Rect(self.width - 260, 12, 230, 32)
         pygame.draw.rect(self.screen, (20, 50, 30), badge_rect, border_radius=6)
         pygame.draw.rect(self.screen, (60, 220, 100), badge_rect, 2, border_radius=6)
-        self.screen.blit(badge_txt, (SCREEN_WIDTH - 245, 16))
+        self.screen.blit(badge_txt, (self.width - 245, 16))
 
-        # Layout coordinates
-        margin_x = 40
-        top_y = 80
-        col_gap = 40
-        col2_x = margin_x + DEV_CAMERA_WIDTH + col_gap
-        row2_y = top_y + DEV_CAMERA_HEIGHT + 36
+        # Dynamically scale feed dimensions for the current screen height & width
+        if self.height >= 900:
+            cam_w = DEV_CAMERA_WIDTH   # 540
+            cam_h = DEV_CAMERA_HEIGHT  # 405
+            top_y = 78
+            tele_h = 280
+            col_gap = 35
+        else:
+            cam_w = min(DEV_CAMERA_WIDTH, max(400, (self.width - 100) // 2))
+            cam_h = int(cam_w * 0.75)
+            top_y = 66
+            tele_h = max(170, min(240, self.height - cam_h - top_y - 70))
+            col_gap = 25
+
+        margin_x = max(15, (self.width - (cam_w * 2 + col_gap)) // 2)
+        col2_x = margin_x + cam_w + col_gap
+        row2_y = top_y + cam_h + 30
 
         # --- 1. Top Left: Live Camera Tracking Feed with DocScanner Quad ---
-        pygame.draw.rect(self.screen, (10, 12, 16), (margin_x - 4, top_y - 28, DEV_CAMERA_WIDTH + 8, DEV_CAMERA_HEIGHT + 36), border_radius=8)
-        pygame.draw.rect(self.screen, (0, 180, 255), (margin_x - 4, top_y - 28, DEV_CAMERA_WIDTH + 8, DEV_CAMERA_HEIGHT + 36), 2, border_radius=8)
+        pygame.draw.rect(self.screen, (10, 12, 16), (margin_x - 4, top_y - 28, cam_w + 8, cam_h + 36), border_radius=8)
+        pygame.draw.rect(self.screen, (0, 180, 255), (margin_x - 4, top_y - 28, cam_w + 8, cam_h + 36), 2, border_radius=8)
         lbl_cam = self.font_hud_title.render("LIVE CAMERA FEED (DocScanner Bounds & LED)", True, (0, 220, 255))
         self.screen.blit(lbl_cam, (margin_x + 8, top_y - 24))
         if self.dev_frame_surf:
-            self.screen.blit(self.dev_frame_surf, (margin_x, top_y + 4))
+            if self.dev_frame_surf.get_width() != cam_w or self.dev_frame_surf.get_height() != cam_h:
+                scaled_cam = pygame.transform.smoothscale(self.dev_frame_surf, (cam_w, cam_h))
+                self.screen.blit(scaled_cam, (margin_x, top_y + 4))
+            else:
+                self.screen.blit(self.dev_frame_surf, (margin_x, top_y + 4))
 
         # --- 2. Top Right: OpenCV Threshold Mask ---
-        pygame.draw.rect(self.screen, (10, 12, 16), (col2_x - 4, top_y - 28, DEV_CAMERA_WIDTH + 8, DEV_CAMERA_HEIGHT + 36), border_radius=8)
-        pygame.draw.rect(self.screen, (255, 180, 0), (col2_x - 4, top_y - 28, DEV_CAMERA_WIDTH + 8, DEV_CAMERA_HEIGHT + 36), 2, border_radius=8)
+        pygame.draw.rect(self.screen, (10, 12, 16), (col2_x - 4, top_y - 28, cam_w + 8, cam_h + 36), border_radius=8)
+        pygame.draw.rect(self.screen, (255, 180, 0), (col2_x - 4, top_y - 28, cam_w + 8, cam_h + 36), 2, border_radius=8)
         lbl_thresh = self.font_hud_title.render(f"OPENCV THRESHOLD MASK (Threshold: {self.current_threshold})", True, (255, 190, 20))
         self.screen.blit(lbl_thresh, (col2_x + 8, top_y - 24))
         if self.dev_thresh_surf:
-            self.screen.blit(self.dev_thresh_surf, (col2_x, top_y + 4))
+            if self.dev_thresh_surf.get_width() != cam_w or self.dev_thresh_surf.get_height() != cam_h:
+                scaled_thresh = pygame.transform.smoothscale(self.dev_thresh_surf, (cam_w, cam_h))
+                self.screen.blit(scaled_thresh, (col2_x, top_y + 4))
+            else:
+                self.screen.blit(self.dev_thresh_surf, (col2_x, top_y + 4))
 
         # --- 3. Bottom Left: Telemetry & Controls Card ---
-        tele_w = DEV_CAMERA_WIDTH
-        tele_h = 280
-        pygame.draw.rect(self.screen, (12, 15, 20), (margin_x - 4, row2_y - 28, tele_w + 8, tele_h + 36), border_radius=8)
-        pygame.draw.rect(self.screen, (80, 220, 100), (margin_x - 4, row2_y - 28, tele_w + 8, tele_h + 36), 2, border_radius=8)
+        pygame.draw.rect(self.screen, (12, 15, 20), (margin_x - 4, row2_y - 28, cam_w + 8, tele_h + 36), border_radius=8)
+        pygame.draw.rect(self.screen, (80, 220, 100), (margin_x - 4, row2_y - 28, cam_w + 8, tele_h + 36), 2, border_radius=8)
         lbl_tele = self.font_hud_title.render("DIAGNOSTICS & TELEMETRY", True, (100, 255, 120))
         self.screen.blit(lbl_tele, (margin_x + 8, row2_y - 24))
 
@@ -325,15 +351,14 @@ class Whiteboard:
         circ_val = self.dev_info.get("circularity", 0.0)
         aspect_val = self.dev_info.get("aspect_ratio", 0.0)
         in_display = self.dev_info.get("in_display_area", False)
-        peak_val = self.dev_info.get("peak_brightness", 0)
         excess_val = self.dev_info.get("purple_excess", 0.0)
         is_ir = self.dev_info.get("is_ir_purple", False)
 
         action_str = "LIGHT OFF (PEN LIFTED)"
         if self.current_screen_point:
-            if self._point_in_rect(self.current_screen_point, ERASER_BUTTON_RECT):
+            if self._point_in_rect(self.current_screen_point, self.eraser_rect):
                 action_str = f"OVER ERASER BUTTON [Hits: {self.eraser_dwell}]"
-            elif self._point_in_rect(self.current_screen_point, SAVE_BUTTON_RECT):
+            elif self._point_in_rect(self.current_screen_point, self.save_rect):
                 action_str = f"OVER SAVE BUTTON [Hits: {self.save_dwell}]"
             elif self.eraser_mode:
                 action_str = "ERASING DOT"
@@ -344,6 +369,7 @@ class Whiteboard:
 
         tele_lines = [
             f"FPS              : {fps:.1f}",
+            f"Display Size     : {self.width}x{self.height} (Aspect: {self.aspect_ratio:.2f}:1)",
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
             f"IR Spectral Type : {ir_status_str}",
             f"White Board Disc : ACTIVE (Whiteboard drawings rejected)",
@@ -355,24 +381,29 @@ class Whiteboard:
             f"Marker Action    : {action_str}",
         ]
 
-        text_y = row2_y + 8
+        text_y = row2_y + 4
+        line_step = 22 if self.height < 900 else 24
         for line in tele_lines:
             color = (120, 255, 150) if "LIGHT ON" in line or "YES" in line else (210, 215, 225)
             line_surf = self.font_hud_val.render(line, True, color)
             self.screen.blit(line_surf, (margin_x + 14, text_y))
-            text_y += 26
+            text_y += line_step
 
         # --- 4. Bottom Right: Interactive Test Drawing Pad ---
-        pygame.draw.rect(self.screen, (10, 12, 16), (col2_x - 4, row2_y - 28, tele_w + 8, tele_h + 36), border_radius=8)
-        pygame.draw.rect(self.screen, (180, 100, 255), (col2_x - 4, row2_y - 28, tele_w + 8, tele_h + 36), 2, border_radius=8)
+        pygame.draw.rect(self.screen, (10, 12, 16), (col2_x - 4, row2_y - 28, cam_w + 8, tele_h + 36), border_radius=8)
+        pygame.draw.rect(self.screen, (180, 100, 255), (col2_x - 4, row2_y - 28, cam_w + 8, tele_h + 36), 2, border_radius=8)
         lbl_pad = self.font_hud_title.render("TEST DRAWING PAD (Preview: Dots Appear Here)", True, (200, 130, 255))
         self.screen.blit(lbl_pad, (col2_x + 8, row2_y - 24))
-        self.screen.blit(self.dev_test_pad, (col2_x, row2_y + 4))
+        if self.dev_test_pad.get_width() != cam_w or self.dev_test_pad.get_height() != tele_h:
+            scaled_pad = pygame.transform.scale(self.dev_test_pad, (cam_w, tele_h))
+            self.screen.blit(scaled_pad, (col2_x, row2_y + 4))
+        else:
+            self.screen.blit(self.dev_test_pad, (col2_x, row2_y + 4))
 
         # Bottom help text
         help_text = "[ESC] Quit   [TAB] Switch to Fullscreen Whiteboard   [C] Clear Test Pad   [[ / ]] Tune IR Threshold"
         help_surf = self.font_status.render(help_text, True, (130, 140, 160))
-        self.screen.blit(help_surf, (40, SCREEN_HEIGHT - 35))
+        self.screen.blit(help_surf, (margin_x, self.height - 35))
 
     def save_canvas(self):
         """Save the current drawing to a timestamped PNG file."""
@@ -384,7 +415,7 @@ class Whiteboard:
             pygame.image.save(self.canvas, filepath)
             self.notification = (f"Saved: {filename}", time.time() + 2.5)
             print(f"[Whiteboard] Saved drawing to: {filepath}")
-            pygame.draw.rect(self.screen, (60, 255, 60), (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT), 8)
+            pygame.draw.rect(self.screen, (60, 255, 60), (0, 0, self.width, self.height), 8)
             pygame.display.flip()
             pygame.time.wait(150)
         except Exception as e:
@@ -407,7 +438,7 @@ class Whiteboard:
     def _render_buttons(self):
         """Render on-screen button controls with active states and dwell progress bars."""
         # --- ERASER BUTTON ---
-        ex, ey, ew, eh = ERASER_BUTTON_RECT
+        ex, ey, ew, eh = self.eraser_rect
         if self.eraser_mode:
             bg_color = (180, 40, 40)
             border_color = (255, 80, 80)
@@ -419,8 +450,8 @@ class Whiteboard:
             text_color = (180, 180, 180)
             label = "ERASER"
 
-        pygame.draw.rect(self.screen, bg_color, ERASER_BUTTON_RECT, border_radius=6)
-        pygame.draw.rect(self.screen, border_color, ERASER_BUTTON_RECT, 2, border_radius=6)
+        pygame.draw.rect(self.screen, bg_color, self.eraser_rect, border_radius=6)
+        pygame.draw.rect(self.screen, border_color, self.eraser_rect, 2, border_radius=6)
         lbl_surf = self.font_btn.render(label, True, text_color)
         self.screen.blit(lbl_surf, (ex + (ew - lbl_surf.get_width()) // 2, ey + (eh - lbl_surf.get_height()) // 2))
 
@@ -430,9 +461,9 @@ class Whiteboard:
             pygame.draw.rect(self.screen, (255, 120, 120), (ex, ey + eh - 6, fill_w, 6), border_radius=3)
 
         # --- SAVE BUTTON ---
-        sx, sy, sw, sh = SAVE_BUTTON_RECT
-        pygame.draw.rect(self.screen, (35, 35, 35), SAVE_BUTTON_RECT, border_radius=6)
-        pygame.draw.rect(self.screen, (80, 200, 80), SAVE_BUTTON_RECT, 2, border_radius=6)
+        sx, sy, sw, sh = self.save_rect
+        pygame.draw.rect(self.screen, (35, 35, 35), self.save_rect, border_radius=6)
+        pygame.draw.rect(self.screen, (80, 200, 80), self.save_rect, 2, border_radius=6)
         save_surf = self.font_btn.render("SAVE", True, (100, 240, 100))
         self.screen.blit(save_surf, (sx + (sw - save_surf.get_width()) // 2, sy + (sh - save_surf.get_height()) // 2))
 
@@ -447,15 +478,15 @@ class Whiteboard:
         msg, expiry = self.notification
         if now < expiry:
             txt_surf = self.font_status.render(msg, True, (240, 240, 240))
-            bg_rect = pygame.Rect(20, SCREEN_HEIGHT - 75, txt_surf.get_width() + 20, txt_surf.get_height() + 10)
+            bg_rect = pygame.Rect(20, self.height - 75, txt_surf.get_width() + 20, txt_surf.get_height() + 10)
             pygame.draw.rect(self.screen, (40, 40, 40), bg_rect, border_radius=4)
             pygame.draw.rect(self.screen, (90, 90, 90), bg_rect, 1, border_radius=4)
-            self.screen.blit(txt_surf, (30, SCREEN_HEIGHT - 70))
+            self.screen.blit(txt_surf, (30, self.height - 70))
 
         # Bottom help text in production
         help_text = "[ESC] Quit   [TAB] Testing Bench   [E] Eraser   [S] Save   [C] Clear   [[ / ]] Tune Thresh"
         help_surf = self.font_status.render(help_text, True, (100, 100, 100))
-        self.screen.blit(help_surf, (20, SCREEN_HEIGHT - 35))
+        self.screen.blit(help_surf, (20, self.height - 35))
 
     @staticmethod
     def _draw_interpolated_stroke(surface, color, p1, p2, radius):

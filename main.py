@@ -164,15 +164,16 @@ def main():
     is_dev = (chosen_mode == "testing")
     print(f"[Main] Active mode: {'TESTING / DEVELOPMENT' if is_dev else 'PRODUCTION'}")
 
-    # 4. Setup Coordinate Transformer, IR Detector, and Whiteboard Canvas
-    print("[Main] Initializing coordinate transformer & detector...")
-    transformer = CoordinateTransformer(homography_matrix)
-    display_quad = transformer.get_display_quad()
-    detector = IRDetector(threshold=args.threshold)
-
+    # 4. Launch Whiteboard Canvas & Initialize Coordinate Transformer
     print("[Main] Launching Whiteboard canvas...")
     whiteboard = Whiteboard(dev_mode=is_dev)
-    whiteboard.set_current_threshold(detector.threshold)
+    whiteboard.set_current_threshold(args.threshold)
+    print(f"[Main] Active Display Resolution: {whiteboard.width}x{whiteboard.height} (Aspect: {whiteboard.aspect_ratio:.2f}:1)")
+
+    print("[Main] Initializing coordinate transformer & detector for active display...")
+    transformer = CoordinateTransformer(homography_matrix, screen_width=whiteboard.width, screen_height=whiteboard.height)
+    display_quad = transformer.get_display_quad()
+    detector = IRDetector(threshold=args.threshold)
 
     # 5. Main Event & Tracking Loop
     print("\n[Main] Smart Notebook is active!")

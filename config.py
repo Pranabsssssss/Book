@@ -9,10 +9,64 @@ DEFAULT_MODE = "production"
 DEV_CAMERA_WIDTH = 540
 DEV_CAMERA_HEIGHT = 405
 
-# === Display Configuration ===
-# Default target is full HD 1080p HDMI monitor
-SCREEN_WIDTH = 1920
-SCREEN_HEIGHT = 1080
+# === Display Configuration & Auto-Detection ===
+def get_display_resolution(fallback_w: int = 1920, fallback_h: int = 1080) -> tuple[int, int]:
+    """
+    Auto-detect the native resolution of the current connected display monitor.
+    Works seamlessly across Windows, Raspberry Pi OS (X11 / Wayland / KMS-DRM), macOS, and Linux.
+    Does not assume a fixed 1920x1080 display.
+    """
+    try:
+        import pygame
+        if not pygame.get_init():
+            pygame.init()
+        info = pygame.display.Info()
+        if info.current_w > 0 and info.current_h > 0:
+            return int(info.current_w), int(info.current_h)
+    except Exception:
+        pass
+    return fallback_w, fallback_h
+
+
+def get_calibration_points(width: int, height: int, margin: int = 50) -> list[tuple[int, int]]:
+    """
+    Calculate dynamic calibration target coordinates for any screen resolution.
+    Returns: [Top-Left, Top-Right, Bottom-Right, Bottom-Left, Center].
+    """
+    m_x = min(margin, max(25, int(width * 0.035)))
+    m_y = min(margin, max(25, int(height * 0.035)))
+    return [
+        (m_x, m_y),                             # Top-Left
+        (width - m_x, m_y),                     # Top-Right
+        (width - m_x, height - m_y),            # Bottom-Right
+        (m_x, height - m_y),                    # Bottom-Left
+        (width // 2, height // 2)               # Center Validation
+    ]
+
+
+def get_button_rects(width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """
+    Calculate dynamic ERASER and SAVE button zones anchored to the bottom-right corner
+    of any screen resolution. Returns ((ex, ey, ew, eh), (sx, sy, sw, sh)).
+    """
+    btn_w = min(140, max(100, int(width * 0.08)))
+    btn_h = min(60, max(42, int(height * 0.055)))
+    margin_right = min(30, max(15, int(width * 0.02)))
+    margin_bottom = min(30, max(15, int(height * 0.03)))
+    gap = 16
+
+    save_x = width - margin_right - btn_w
+    save_y = height - margin_bottom - btn_h
+    eraser_x = save_x - gap - btn_w
+    eraser_y = save_y
+
+    return (eraser_x, eraser_y, btn_w, btn_h), (save_x, save_y, btn_w, btn_h)
+
+
+# Native display resolution auto-detected at startup
+DETECTED_SCREEN_WIDTH, DETECTED_SCREEN_HEIGHT = get_display_resolution(1920, 1080)
+SCREEN_WIDTH = DETECTED_SCREEN_WIDTH
+SCREEN_HEIGHT = DETECTED_SCREEN_HEIGHT
 
 # === Camera Configuration ===
 # Backend selection:
@@ -64,23 +118,15 @@ PEN_LIFT_TIMEOUT = 0.10
 # Prevents spiderweb lines when pen moves while off, or on brief lighting shifts.
 MAX_STROKE_JUMP = 150
 
-# === Calibration Configuration ===
-CALIBRATION_POINTS = [
-    (100, 100),              # Top-Left
-    (1820, 100),             # Top-Right
-    (1820, 980),             # Bottom-Right
-    (100, 980),              # Bottom-Left
-    (960, 540),              # Center (Validation)
-]
+# === Calibration Configuration (Dynamically measured for current display) ===
+CALIBRATION_POINTS = get_calibration_points(SCREEN_WIDTH, SCREEN_HEIGHT)
 CALIBRATION_DOT_RADIUS = 30
 CALIBRATION_FRAMES = 10
 CALIBRATION_TIMEOUT_SEC = 4
 MAX_VALIDATION_ERROR_PX = 50
 
-# === UI Zones & Controls ===
-# Format: (x, y, width, height) in bottom-right corner
-ERASER_BUTTON_RECT = (1600, 990, 140, 60)
-SAVE_BUTTON_RECT = (1760, 990, 140, 60)
+# === UI Zones & Controls (Dynamically anchored to current display) ===
+ERASER_BUTTON_RECT, SAVE_BUTTON_RECT = get_button_rects(SCREEN_WIDTH, SCREEN_HEIGHT)
 
 # Frames of light presence required to trigger button.
 # Set to 2 frames so a quick tap or remote blink reliably triggers without needing long continuous hold.

@@ -11,9 +11,10 @@ except ImportError:
 
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
-    CALIBRATION_POINTS, CALIBRATION_DOT_RADIUS,
+    CALIBRATION_DOT_RADIUS,
     CALIBRATION_FILE,
-    CAMERA_WIDTH, CAMERA_HEIGHT
+    CAMERA_WIDTH, CAMERA_HEIGHT,
+    get_calibration_points, get_display_resolution
 )
 
 
@@ -44,19 +45,34 @@ def load_calibration() -> np.ndarray:
     return matrix
 
 
-def save_calibration(matrix: np.ndarray, error_px: float = None):
-    """Save homography matrix and metadata to calibration.json."""
+def load_calibration_resolution() -> tuple[int, int]:
+    """Load the screen resolution associated with the saved calibration data."""
+    if not os.path.exists(CALIBRATION_FILE):
+        return get_display_resolution(SCREEN_WIDTH, SCREEN_HEIGHT)
+    try:
+        with open(CALIBRATION_FILE, 'r') as f:
+            data = json.load(f)
+        res = data.get("screen_resolution", [SCREEN_WIDTH, SCREEN_HEIGHT])
+        return int(res[0]), int(res[1])
+    except Exception:
+        return get_display_resolution(SCREEN_WIDTH, SCREEN_HEIGHT)
+
+
+def save_calibration(matrix: np.ndarray, error_px: float = None, screen_resolution: tuple = None, points: list = None):
+    """Save homography matrix and display metadata to calibration.json."""
     os.makedirs(os.path.dirname(CALIBRATION_FILE), exist_ok=True)
+    res = list(screen_resolution) if screen_resolution else [SCREEN_WIDTH, SCREEN_HEIGHT]
+    pts = points if points is not None else get_calibration_points(int(res[0]), int(res[1]))
     payload = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "screen_resolution": [SCREEN_WIDTH, SCREEN_HEIGHT],
+        "screen_resolution": [int(res[0]), int(res[1])],
         "validation_error_px": float(error_px) if error_px is not None else None,
-        "calibration_points": CALIBRATION_POINTS,
+        "calibration_points": pts,
         "homography_matrix": matrix.tolist()
     }
     with open(CALIBRATION_FILE, 'w') as f:
         json.dump(payload, f, indent=2)
-    print(f"[Calibration] Saved matrix to: {CALIBRATION_FILE}")
+    print(f"[Calibration] Saved matrix for {res[0]}x{res[1]} display to: {CALIBRATION_FILE}")
 
 
 def run_calibration(camera, screen=None) -> np.ndarray:
@@ -80,12 +96,14 @@ def run_calibration(camera, screen=None) -> np.ndarray:
     if screen is None:
         if not pygame.get_init():
             pygame.init()
-        screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN)
+        # Open in native fullscreen: (0, 0) detects the exact maximum resolution of the current monitor!
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         pygame.display.set_caption("Smart Notebook - Display Edge Calibration")
         owns_screen = True
 
     sw = screen.get_width()
     sh = screen.get_height()
+    print(f"[Calibration] Detected display resolution: {sw}x{sh} (Aspect ratio: {sw/sh:.2f}:1)")
 
     font_title = pygame.font.SysFont("Arial", 28, bold=True)
     font_instruction = pygame.font.SysFont("Arial", 22, bold=True)
@@ -105,7 +123,7 @@ def run_calibration(camera, screen=None) -> np.ndarray:
             restart_calibration = False
 
             print("\n" + "=" * 70)
-            print("[Calibration] Starting Differential Dots Calibration for Display Edges...")
+            print(f"[Calibration] Starting Differential Dots Calibration for {sw}x{sh} Display...")
             print("=" * 70)
 
             # -------------------------------------------------------------
@@ -131,22 +149,16 @@ def run_calibration(camera, screen=None) -> np.ndarray:
 
             # -------------------------------------------------------------
             # Phase 2: Sequential Display Dot Targets
-            # Top-Left, Top-Right, Bottom-Right, Bottom-Left, Center
+            # Measured dynamically to current display size (sw, sh)
             # -------------------------------------------------------------
-            target_coords = [
-                (50, 50),                                      # Top-Left
-                (SCREEN_WIDTH - 50, 50),                       # Top-Right
-                (SCREEN_WIDTH - 50, SCREEN_HEIGHT - 50),       # Bottom-Right
-                (50, SCREEN_HEIGHT - 50),                      # Bottom-Left
-                (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)        # Center Validation
-            ]
+            target_coords = get_calibration_points(sw, sh)
 
             corner_labels = [
-                "Point 1 of 4: TOP-LEFT Corner",
-                "Point 2 of 4: TOP-RIGHT Corner",
-                "Point 3 of 4: BOTTOM-RIGHT Corner",
-                "Point 4 of 4: BOTTOM-LEFT Corner",
-                "Validation: CENTER Target"
+                f"Point 1 of 4: TOP-LEFT Corner ({target_coords[0][0]}, {target_coords[0][1]})",
+                f"Point 2 of 4: TOP-RIGHT Corner ({target_coords[1][0]}, {target_coords[1][1]})",
+                f"Point 3 of 4: BOTTOM-RIGHT Corner ({target_coords[2][0]}, {target_coords[2][1]})",
+                f"Point 4 of 4: BOTTOM-LEFT Corner ({target_coords[3][0]}, {target_coords[3][1]})",
+                f"Validation: CENTER Target ({target_coords[4][0]}, {target_coords[4][1]})"
             ]
 
             for idx, (sx, sy) in enumerate(target_coords):
@@ -183,14 +195,14 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                             restart_calibration = True
                             break
                         elif event.key == pygame.K_SPACE:
-                            # Manual bypass for PC testing
-                            manual_pt = (float(sx / SCREEN_WIDTH * CAMERA_WIDTH), float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT))
+                            # Manual bypass for PC testing: scale proportionally to sw, sh
+                            manual_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
                         elif event.key == pygame.K_s:
                             ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0)
+                            save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
                             return ident
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        manual_pt = (float(sx / SCREEN_WIDTH * CAMERA_WIDTH), float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT))
+                        manual_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
 
                 if restart_calibration:
                     break
@@ -219,8 +231,8 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                         if max_v > 20:
                             detected_cam_pt = (float(max_l[0]), float(max_l[1]))
                         else:
-                            # Fallback proportional mapping
-                            detected_cam_pt = (float(sx / SCREEN_WIDTH * CAMERA_WIDTH), float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT))
+                            # Fallback proportional mapping to active display
+                            detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
 
                 camera_points.append(detected_cam_pt)
                 screen_points.append((sx, sy))
@@ -329,8 +341,8 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                         raise KeyboardInterrupt("Calibration aborted by user.")
                     elif event.type == pygame.KEYDOWN:
                         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y):
-                            print("[Calibration] Calibration accepted by user via [ENTER]. Saving...")
-                            save_calibration(homography_matrix, error_px=val_error)
+                            print(f"[Calibration] Calibration accepted by user via [ENTER] for {sw}x{sh} display. Saving...")
+                            save_calibration(homography_matrix, error_px=val_error, screen_resolution=(sw, sh), points=target_coords)
                             return homography_matrix
                         elif event.key == pygame.K_r:
                             print("[Calibration] Recalibrate key [R] pressed by user. Restarting calibration...")
@@ -338,16 +350,16 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                             review_active = False
                             break
                         elif event.key == pygame.K_SPACE:
-                            print("[Calibration] User selected default 1:1 bounds via [SPACE].")
+                            print(f"[Calibration] User selected default 1:1 bounds via [SPACE] for {sw}x{sh} display.")
                             ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0)
+                            save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
                             return ident
                         elif event.key == pygame.K_ESCAPE:
                             raise KeyboardInterrupt("Calibration aborted by user via ESC.")
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         if btn_accept_rect.collidepoint(mouse_pos):
-                            print("[Calibration] Calibration accepted by user via [Accept] button. Saving...")
-                            save_calibration(homography_matrix, error_px=val_error)
+                            print(f"[Calibration] Calibration accepted by user via [Accept] button for {sw}x{sh} display. Saving...")
+                            save_calibration(homography_matrix, error_px=val_error, screen_resolution=(sw, sh), points=target_coords)
                             return homography_matrix
                         elif btn_recalib_rect.collidepoint(mouse_pos):
                             print("[Calibration] User clicked [Recalibrate Again]. Restarting calibration...")
@@ -355,9 +367,9 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                             review_active = False
                             break
                         elif btn_default_rect.collidepoint(mouse_pos):
-                            print("[Calibration] User clicked [Default Bounds].")
+                            print(f"[Calibration] User clicked [Default Bounds] for {sw}x{sh} display.")
                             ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0)
+                            save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
                             return ident
 
                 if not review_active:
@@ -476,13 +488,13 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                 # Corner Coordinates Table
                 line_y = card_rect.y + 76
                 t_lines = [
-                    f"Top-Left     [TL] : Camera ({camera_points[0][0]:.1f}, {camera_points[0][1]:.1f})  ->  Screen (50, 50)",
-                    f"Top-Right    [TR] : Camera ({camera_points[1][0]:.1f}, {camera_points[1][1]:.1f})  ->  Screen ({SCREEN_WIDTH-50}, 50)",
-                    f"Bottom-Right [BR] : Camera ({camera_points[2][0]:.1f}, {camera_points[2][1]:.1f})  ->  Screen ({SCREEN_WIDTH-50}, {SCREEN_HEIGHT-50})",
-                    f"Bottom-Left  [BL] : Camera ({camera_points[3][0]:.1f}, {camera_points[3][1]:.1f})  ->  Screen (50, {SCREEN_HEIGHT-50})",
+                    f"Top-Left     [TL] : Camera ({camera_points[0][0]:.1f}, {camera_points[0][1]:.1f})  ->  Display ({target_coords[0][0]}, {target_coords[0][1]})",
+                    f"Top-Right    [TR] : Camera ({camera_points[1][0]:.1f}, {camera_points[1][1]:.1f})  ->  Display ({target_coords[1][0]}, {target_coords[1][1]})",
+                    f"Bottom-Right [BR] : Camera ({camera_points[2][0]:.1f}, {camera_points[2][1]:.1f})  ->  Display ({target_coords[2][0]}, {target_coords[2][1]})",
+                    f"Bottom-Left  [BL] : Camera ({camera_points[3][0]:.1f}, {camera_points[3][1]:.1f})  ->  Display ({target_coords[3][0]}, {target_coords[3][1]})",
                 ]
                 if len(camera_points) >= 5:
-                    t_lines.append(f"Screen Center[CC] : Camera ({camera_points[4][0]:.1f}, {camera_points[4][1]:.1f})  ->  Screen ({SCREEN_WIDTH//2}, {SCREEN_HEIGHT//2})")
+                    t_lines.append(f"Screen Center[CC] : Camera ({camera_points[4][0]:.1f}, {camera_points[4][1]:.1f})  ->  Display ({target_coords[4][0]}, {target_coords[4][1]})")
 
                 for tl in t_lines:
                     ts = font_mono.render(tl, True, (210, 225, 245))
@@ -497,7 +509,7 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                 dim_lines = [
                     f"Edge Widths  : Top: {w_top:.0f} px  |  Bottom: {w_btm:.0f} px",
                     f"Edge Heights : Left: {h_left:.0f} px  |  Right: {h_right:.0f} px",
-                    f"Aspect Ratio : {aspect:.2f} : 1.0 (Screen Target: {SCREEN_WIDTH/SCREEN_HEIGHT:.2f} : 1.0)"
+                    f"Aspect Ratio : {aspect:.2f} : 1.0 (Display Native: {sw/sh:.2f} : 1.0)"
                 ]
                 for dl in dim_lines:
                     ds = font_mono.render(dl, True, (170, 195, 225))
