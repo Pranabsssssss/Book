@@ -14,8 +14,10 @@ from config import (
     CALIBRATION_DOT_RADIUS,
     CALIBRATION_FILE,
     CAMERA_WIDTH, CAMERA_HEIGHT,
+    CALIBRATION_IR_THRESHOLD,
     get_calibration_points, get_display_resolution
 )
+from detector import IRDetector
 
 
 def calibration_exists() -> bool:
@@ -75,6 +77,35 @@ def save_calibration(matrix: np.ndarray, error_px: float = None, screen_resoluti
     print(f"[Calibration] Saved matrix for {res[0]}x{res[1]} display to: {CALIBRATION_FILE}")
 
 
+def validate_corner_points(pts: list, cam_w: int, cam_h: int) -> tuple[bool, list]:
+    """
+    Ensures the 4 detected corners form a wide, non-collapsed quadrilateral.
+    Prevents points from clustering in the center.
+    """
+    if len(pts) < 4:
+        return False, pts
+
+    d_top = float(np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]))
+    d_right = float(np.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1]))
+    d_bottom = float(np.hypot(pts[3][0] - pts[2][0], pts[3][1] - pts[2][1]))
+    d_left = float(np.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1]))
+
+    quad_arr = np.array(pts[:4], dtype=np.float32)
+    area = float(cv2.contourArea(quad_arr))
+
+    # If area is too small or edges are under 60px, points collapsed into the center!
+    if area < 8000.0 or min(d_top, d_right, d_bottom, d_left) < 60.0:
+        fallback_corners = [
+            (25.0, 25.0),
+            (float(cam_w - 25), 25.0),
+            (float(cam_w - 25), float(cam_h - 25)),
+            (25.0, float(cam_h - 25))
+        ]
+        return False, fallback_corners
+
+    return True, pts
+
+
 def run_calibration(camera, screen=None) -> np.ndarray:
     """
     Differential Dots Method for Display Edges Calibration.
@@ -127,121 +158,150 @@ def run_calibration(camera, screen=None) -> np.ndarray:
             print("=" * 70)
 
             # -------------------------------------------------------------
-            # Phase 1: Capture Black Baseline Frame
+            # Phase 1: Capture Black Baseline Frame (100% PURE BLACK)
             # -------------------------------------------------------------
-            screen.fill((0, 0, 0))
-            msg_init = font_title.render("CALIBRATING DISPLAY EDGES — DOTS METHOD", True, (0, 230, 255))
-            msg_sub = font_instruction.render("Capturing background baseline... Please do not move camera.", True, (200, 210, 230))
+            screen.fill((14, 17, 24))
+            msg_init = font_title.render("CALIBRATING DISPLAY EDGES", True, (0, 230, 255))
+            msg_sub = font_instruction.render("Step 1: Measuring black background level. Blanking screen...", True, (200, 210, 230))
             screen.blit(msg_init, (sw // 2 - msg_init.get_width() // 2, sh // 2 - 40))
             screen.blit(msg_sub, (sw // 2 - msg_sub.get_width() // 2, sh // 2 + 15))
             pygame.display.flip()
+            time.sleep(1.0)
 
-            time.sleep(1.0)  # Allow screen black level to settle
+            # Turn screen 100% PURE BLACK with ZERO text anywhere!
+            screen.fill((0, 0, 0))
+            pygame.display.flip()
+            time.sleep(0.6)  # Let display backlight settle to full black
 
-            # Average 3 black frames to eliminate camera sensor noise
+            # Average 4 black frames to eliminate camera sensor thermal noise
             black_accum = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.float32)
-            for _ in range(3):
+            for _ in range(4):
                 f = camera.capture_frame().astype(np.float32)
                 black_accum += f
-                time.sleep(0.05)
-            black_baseline = (black_accum / 3.0).astype(np.uint8)
+                time.sleep(0.04)
+            black_baseline = (black_accum / 4.0).astype(np.uint8)
             black_gray = cv2.cvtColor(black_baseline, cv2.COLOR_RGB2GRAY)
 
             # -------------------------------------------------------------
             # Phase 2: Sequential Display Dot Targets
             # Measured dynamically to current display size (sw, sh)
+            # ZERO center text, contour-based blob finding, & IR LED detection
             # -------------------------------------------------------------
             target_coords = get_calibration_points(sw, sh)
+            detector = IRDetector(threshold=CALIBRATION_IR_THRESHOLD)
 
             corner_labels = [
-                f"Point 1 of 4: TOP-LEFT Corner ({target_coords[0][0]}, {target_coords[0][1]})",
-                f"Point 2 of 4: TOP-RIGHT Corner ({target_coords[1][0]}, {target_coords[1][1]})",
-                f"Point 3 of 4: BOTTOM-RIGHT Corner ({target_coords[2][0]}, {target_coords[2][1]})",
-                f"Point 4 of 4: BOTTOM-LEFT Corner ({target_coords[3][0]}, {target_coords[3][1]})",
-                f"Validation: CENTER Target ({target_coords[4][0]}, {target_coords[4][1]})"
+                f"Point 1 of 4: TOP-LEFT Corner",
+                f"Point 2 of 4: TOP-RIGHT Corner",
+                f"Point 3 of 4: BOTTOM-RIGHT Corner",
+                f"Point 4 of 4: BOTTOM-LEFT Corner",
+                f"Validation: CENTER Target"
             ]
 
             for idx, (sx, sy) in enumerate(target_coords):
-                # Render Target Dot on Screen
+                # Render Target Dot on Screen - ZERO CENTERED TEXT!
                 screen.fill((0, 0, 0))
 
-                # Draw prominent white calibration target
-                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 36)
-                pygame.draw.circle(screen, (0, 0, 0), (sx, sy), 8)
-                pygame.draw.line(screen, (255, 255, 255), (sx - 50, sy), (sx + 50, sy), 2)
-                pygame.draw.line(screen, (255, 255, 255), (sx, sy - 50), (sx, sy + 50), 2)
+                # Draw prominent white calibration bullseye target
+                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 44)
+                pygame.draw.circle(screen, (0, 0, 0), (sx, sy), 10)
+                pygame.draw.line(screen, (255, 255, 255), (sx - 60, sy), (sx + 60, sy), 3)
+                pygame.draw.line(screen, (255, 255, 255), (sx, sy - 60), (sx, sy + 60), 3)
 
-                t_title = font_title.render("CALIBRATING DISPLAY EDGES", True, (0, 230, 255))
-                t_label = font_instruction.render(corner_labels[idx], True, (255, 220, 80))
-                t_hint = font_sub.render("Calculating sub-pixel edge coordinate... [SPACE to simulate on PC | R to Restart]", True, (160, 170, 190))
-
-                screen.blit(t_title, (sw // 2 - t_title.get_width() // 2, 40))
-                screen.blit(t_label, (sw // 2 - t_label.get_width() // 2, 85))
-                screen.blit(t_hint, (sw // 2 - t_hint.get_width() // 2, sh - 45))
+                # Localized non-centered label adjacent to the target
+                lbl_x = max(20, min(sw - 330, sx + 55 if sx < sw // 2 else sx - 320))
+                lbl_y = max(20, min(sh - 50, sy + 55 if sy < sh // 2 else sy - 50))
+                lbl_surf = font_sub.render(f"{corner_labels[idx]} [Aim Remote or Wait]", True, (255, 220, 80))
+                screen.blit(lbl_surf, (lbl_x, lbl_y))
                 pygame.display.flip()
 
-                time.sleep(0.4)  # Wait for monitor display refresh
+                time.sleep(0.25)
 
-                # Pump Pygame events
-                manual_pt = None
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        raise KeyboardInterrupt("Calibration aborted by user.")
-                    elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_ESCAPE:
-                            raise KeyboardInterrupt("Calibration aborted by user via ESC.")
-                        elif event.key == pygame.K_r:
-                            print("[Calibration] Recalibrate key pressed during target sequence. Restarting...")
-                            restart_calibration = True
+                detected_cam_pt = None
+                start_capture_time = time.time()
+
+                # Interactive capture loop: listens for IR remote click, display dot, or keyboard bypass
+                while time.time() - start_capture_time < 1.8:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            raise KeyboardInterrupt("Calibration aborted by user.")
+                        elif event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_ESCAPE:
+                                raise KeyboardInterrupt("Calibration aborted by user via ESC.")
+                            elif event.key == pygame.K_r:
+                                print("[Calibration] Recalibrate key pressed during target sequence. Restarting...")
+                                restart_calibration = True
+                                break
+                            elif event.key == pygame.K_SPACE:
+                                detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
+                                break
+                            elif event.key == pygame.K_s:
+                                ident = np.eye(3, dtype=np.float64)
+                                save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
+                                return ident
+                        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                            detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
                             break
-                        elif event.key == pygame.K_SPACE:
-                            # Manual bypass for PC testing: scale proportionally to sw, sh
-                            manual_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
-                        elif event.key == pygame.K_s:
-                            ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
-                            return ident
-                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        manual_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
+
+                    if restart_calibration or detected_cam_pt is not None:
+                        break
+
+                    # Capture frame from camera
+                    frame = camera.capture_frame()
+
+                    # Check A: Did user aim IR remote / pen at this corner?
+                    ir_pt = detector.detect(frame)
+                    if ir_pt is not None:
+                        detected_cam_pt = ir_pt
+                        print(f"[Calibration] Detected IR Light from remote/pen at: ({ir_pt[0]:.1f}, {ir_pt[1]:.1f})")
+                        break
+
+                    # Check B: Did differential subtraction find the bright display dot?
+                    frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                    diff = cv2.absdiff(frame_gray, black_gray)
+                    diff_blur = cv2.GaussianBlur(diff, (5, 5), 0)
+                    _, diff_thresh = cv2.threshold(diff_blur, 28, 255, cv2.THRESH_BINARY)
+                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                    diff_clean = cv2.morphologyEx(diff_thresh, cv2.MORPH_OPEN, kernel)
+                    contours, _ = cv2.findContours(diff_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    best_blob = None
+                    best_area = 0
+                    for c in contours:
+                        area = cv2.contourArea(c)
+                        if 15 <= area <= 30000:
+                            bx, by, bw, bh = cv2.boundingRect(c)
+                            aspect = float(bw) / max(bh, 1)
+                            if 0.35 <= aspect <= 2.8:
+                                if area > best_area:
+                                    best_area = area
+                                    M = cv2.moments(c)
+                                    if M["m00"] > 0:
+                                        best_blob = (float(M["m10"] / M["m00"]), float(M["m01"] / M["m00"]))
+
+                    if best_blob is not None:
+                        detected_cam_pt = best_blob
+                        print(f"[Calibration] Detected display dot blob (area: {best_area:.0f}) at: ({best_blob[0]:.1f}, {best_blob[1]:.1f})")
+                        break
+
+                    time.sleep(0.04)
 
                 if restart_calibration:
                     break
 
-                if manual_pt is not None:
-                    detected_cam_pt = manual_pt
-                else:
-                    # Capture frame with displayed dot
-                    dot_frame = camera.capture_frame()
-                    dot_gray = cv2.cvtColor(dot_frame, cv2.COLOR_RGB2GRAY)
-
-                    # Differential background subtraction: cancels out 100% of room lighting!
-                    diff = cv2.absdiff(dot_gray, black_gray)
-
-                    # Threshold the difference image
-                    _, diff_thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-                    M = cv2.moments(diff_thresh)
-
-                    if M["m00"] > 10:
-                        cx = float(M["m10"] / M["m00"])
-                        cy = float(M["m01"] / M["m00"])
-                        detected_cam_pt = (cx, cy)
-                    else:
-                        # Fallback to max location if difference was subtle
-                        _, max_v, _, max_l = cv2.minMaxLoc(diff)
-                        if max_v > 20:
-                            detected_cam_pt = (float(max_l[0]), float(max_l[1]))
-                        else:
-                            # Fallback proportional mapping to active display
-                            detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
+                # If neither IR light nor display dot was found after 1.8 seconds:
+                if detected_cam_pt is None:
+                    # Clean proportional corner mapping - NOT (320, 240)!
+                    detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
+                    print(f"[Calibration] Camera did not detect dot. Using proportional mapping: ({detected_cam_pt[0]:.1f}, {detected_cam_pt[1]:.1f})")
 
                 camera_points.append(detected_cam_pt)
                 screen_points.append((sx, sy))
-                print(f"[Calibration] {corner_labels[idx]} -> Cam: ({detected_cam_pt[0]:.1f}, {detected_cam_pt[1]:.1f})")
 
                 # Green flash feedback for success
-                pygame.draw.circle(screen, (60, 255, 100), (sx, sy), 42, 4)
+                pygame.draw.circle(screen, (60, 255, 100), (sx, sy), 50, 4)
                 pygame.display.flip()
-                time.sleep(0.3)
+                time.sleep(0.20)
 
             if restart_calibration:
                 screen.fill((0, 0, 0))
@@ -252,8 +312,14 @@ def run_calibration(camera, screen=None) -> np.ndarray:
                 continue
 
             # -------------------------------------------------------------
-            # Phase 3: Compute Homography Matrix
+            # Phase 3: Compute Homography Matrix with Anti-Collapse Guard
             # -------------------------------------------------------------
+            # Verify that the 4 corners form a wide, non-collapsed quadrilateral
+            is_valid_quad, guarded_pts = validate_corner_points(camera_points[:4], CAMERA_WIDTH, CAMERA_HEIGHT)
+            if not is_valid_quad:
+                print("[Calibration] WARNING: Points were collapsed or clustered in middle! Applying clean corner bounds.")
+                camera_points[:4] = guarded_pts
+
             src_pts = np.array(camera_points[:4], dtype=np.float32)
             dst_pts = np.array(screen_points[:4], dtype=np.float32)
             homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
