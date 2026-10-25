@@ -77,6 +77,79 @@ def save_calibration(matrix: np.ndarray, error_px: float = None, screen_resoluti
     print(f"[Calibration] Saved matrix for {res[0]}x{res[1]} display to: {CALIBRATION_FILE}")
 
 
+def order_quad_points(pts: np.ndarray) -> np.ndarray:
+    """
+    Orders 4 points of a quadrilateral:
+    Top-Left, Top-Right, Bottom-Right, Bottom-Left.
+    """
+    pts = pts.reshape(4, 2).astype(np.float32)
+    rect = np.zeros((4, 2), dtype=np.float32)
+
+    # Top-Left has smallest sum (x + y), Bottom-Right has largest sum
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+
+    # Top-Right has smallest difference (y - x), Bottom-Left has largest difference
+    diff = np.diff(pts, axis=1).flatten()  # y - x
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+
+    return rect
+
+
+def detect_docscanner_quad(frame: np.ndarray) -> np.ndarray:
+    """
+    DocScanner / Page Scanner algorithm: automatically locates the
+    monitor display quadrilateral in the camera view using computer vision.
+    Returns: (4, 2) array of [TL, TR, BR, BL] or None.
+    """
+    if frame is None or frame.size == 0:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 1. Edge-based polygon detection (Canny)
+    edges = cv2.Canny(blurred, 30, 120)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    dilated = cv2.dilate(edges, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 10000:
+            continue
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4 and cv2.isContourConvex(approx):
+            return order_quad_points(approx.reshape(4, 2))
+
+    # 2. Threshold-based fallback (Otsu threshold on glowing monitor display)
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    contours2, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours2 = sorted(contours2, key=cv2.contourArea, reverse=True)[:6]
+
+    for c in contours2:
+        area = cv2.contourArea(c)
+        if area < 10000:
+            continue
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.025 * peri, True)
+        if len(approx) == 4 and cv2.isContourConvex(approx):
+            return order_quad_points(approx.reshape(4, 2))
+        elif len(approx) >= 4:
+            rect = cv2.minAreaRect(c)
+            box = cv2.boxPoints(rect)
+            if cv2.contourArea(box) > 10000:
+                return order_quad_points(box)
+
+    return None
+
+
 def validate_corner_points(pts: list, cam_w: int, cam_h: int) -> tuple[bool, list]:
     """
     Ensures the 4 detected corners form a wide, non-collapsed quadrilateral.
@@ -108,14 +181,14 @@ def validate_corner_points(pts: list, cam_w: int, cam_h: int) -> tuple[bool, lis
 
 def run_calibration(camera, screen=None) -> np.ndarray:
     """
-    Differential Dots Method for Display Edges Calibration.
-    Uses sequential monitor corner dot flashing with differential background subtraction.
-    Cancels out 100% of ambient room lighting and reflections to find the exact sub-pixel
-    camera coordinates of the 4 display edges, just like DocScanner calculates document corners.
+    Dual Mode Calibration System:
+      1. AUTO DOCSCANNER: Scans camera feed using computer vision to detect the
+         monitor screen edges automatically (Page Scanner algorithm).
+      2. MANUAL MOUSE: Lets the user click on the 4 corners of their display in the
+         camera feed, and drag corner pins to fine-tune alignment with millimeter precision.
 
-    Includes a comprehensive live review screen showing the DocScanner display quad,
-    corner pins, edge measurements, reprojection error, and an interactive prompt
-    asking the user to Accept or Recalibrate if alignment did not happen properly.
+    Includes draggable corner handles in both modes so the user can easily tweak
+    any corner pin with their mouse!
     """
     if pygame is None:
         raise RuntimeError(
@@ -127,14 +200,13 @@ def run_calibration(camera, screen=None) -> np.ndarray:
     if screen is None:
         if not pygame.get_init():
             pygame.init()
-        # Open in native fullscreen: (0, 0) detects the exact maximum resolution of the current monitor!
         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-        pygame.display.set_caption("Smart Notebook - Display Edge Calibration")
+        pygame.display.set_caption("Smart Notebook - Display Calibration")
         owns_screen = True
 
     sw = screen.get_width()
     sh = screen.get_height()
-    print(f"[Calibration] Detected display resolution: {sw}x{sh} (Aspect ratio: {sw/sh:.2f}:1)")
+    print(f"[Calibration] Active display resolution: {sw}x{sh} (Aspect ratio: {sw/sh:.2f}:1)")
 
     font_title = pygame.font.SysFont("Arial", 28, bold=True)
     font_instruction = pygame.font.SysFont("Arial", 22, bold=True)
@@ -147,507 +219,558 @@ def run_calibration(camera, screen=None) -> np.ndarray:
     font_btn_sub = pygame.font.SysFont("Arial", 12)
     clock = pygame.time.Clock()
 
+    target_coords = get_calibration_points(sw, sh)
+    dst_pts = np.array(target_coords[:4], dtype=np.float32)
+
     try:
-        while True:
-            camera_points = []
-            screen_points = []
-            restart_calibration = False
+        # =============================================================
+        # STEP 1: Calibration Mode Selection Screen (Auto vs Manual)
+        # =============================================================
+        calib_mode = None  # "auto" or "manual"
+        menu_active = True
 
-            print("\n" + "=" * 70)
-            print(f"[Calibration] Starting Differential Dots Calibration for {sw}x{sh} Display...")
-            print("=" * 70)
+        card1_w = min(460, (sw - 80) // 2)
+        card1_h = 240
+        card_y = sh // 2 - 110
+        gap = 40
+        card1_x = sw // 2 - card1_w - gap // 2
+        card2_x = sw // 2 + gap // 2
 
-            # -------------------------------------------------------------
-            # Phase 1: Capture Black Baseline Frame (100% PURE BLACK)
-            # -------------------------------------------------------------
+        card_auto_rect = pygame.Rect(card1_x, card_y, card1_w, card1_h)
+        card_manual_rect = pygame.Rect(card2_x, card_y, card1_w, card1_h)
+
+        print("[Calibration] Prompting user for calibration method (Auto DocScanner vs Manual Mouse)...")
+
+        while menu_active:
+            mouse_pos = pygame.mouse.get_pos()
+            hover_auto = card_auto_rect.collidepoint(mouse_pos)
+            hover_manual = card_manual_rect.collidepoint(mouse_pos)
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise KeyboardInterrupt("Calibration aborted by user.")
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_1, pygame.K_a):
+                        calib_mode = "auto"
+                        menu_active = False
+                    elif event.key in (pygame.K_2, pygame.K_m):
+                        calib_mode = "manual"
+                        menu_active = False
+                    elif event.key == pygame.K_SPACE:
+                        # Skip directly with 1:1 fallback
+                        ident = np.eye(3, dtype=np.float64)
+                        save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
+                        return ident
+                    elif event.key == pygame.K_ESCAPE:
+                        raise KeyboardInterrupt("Calibration aborted by user via ESC.")
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if hover_auto:
+                        calib_mode = "auto"
+                        menu_active = False
+                    elif hover_manual:
+                        calib_mode = "manual"
+                        menu_active = False
+
+            # Render Selection Screen
             screen.fill((14, 17, 24))
-            msg_init = font_title.render("CALIBRATING DISPLAY EDGES", True, (0, 230, 255))
-            msg_sub = font_instruction.render("Step 1: Measuring black background level. Blanking screen...", True, (200, 210, 230))
-            screen.blit(msg_init, (sw // 2 - msg_init.get_width() // 2, sh // 2 - 40))
-            screen.blit(msg_sub, (sw // 2 - msg_sub.get_width() // 2, sh // 2 + 15))
-            pygame.display.flip()
-            time.sleep(1.0)
 
-            # Turn screen 100% PURE BLACK with ZERO text anywhere!
+            title_surf = font_title.render("SMART NOTEBOOK — DISPLAY CALIBRATION", True, (40, 240, 180))
+            sub_surf = font_sub.render("Choose how you want to calibrate your monitor display boundaries:", True, (200, 215, 235))
+            screen.blit(title_surf, (sw // 2 - title_surf.get_width() // 2, card_y - 95))
+            screen.blit(sub_surf, (sw // 2 - sub_surf.get_width() // 2, card_y - 55))
+
+            # Card 1: AUTO DOCSCANNER
+            c1_bg = (18, 55, 75) if hover_auto else (12, 35, 48)
+            c1_border = (0, 220, 255) if hover_auto else (0, 150, 180)
+            pygame.draw.rect(screen, c1_bg, card_auto_rect, border_radius=12)
+            pygame.draw.rect(screen, c1_border, card_auto_rect, 3 if hover_auto else 2, border_radius=12)
+
+            t_a1 = font_heading.render("[1] AUTO DOCSCANNER MODE", True, (0, 240, 255))
+            t_a2 = font_regular.render("Computer Vision Page Scanner algorithm.", True, (230, 240, 255))
+            t_a3 = font_regular.render("The screen flashes an illuminated border;", True, (170, 195, 220))
+            t_a4 = font_regular.render("the camera automatically detects display edges.", True, (170, 195, 220))
+            t_a5 = font_bold.render("Click here or press [1] to start Auto", True, (60, 255, 100))
+
+            screen.blit(t_a1, (card_auto_rect.x + 25, card_auto_rect.y + 25))
+            screen.blit(t_a2, (card_auto_rect.x + 25, card_auto_rect.y + 68))
+            screen.blit(t_a3, (card_auto_rect.x + 25, card_auto_rect.y + 100))
+            screen.blit(t_a4, (card_auto_rect.x + 25, card_auto_rect.y + 125))
+            screen.blit(t_a5, (card_auto_rect.x + 25, card_auto_rect.y + 180))
+
+            # Card 2: MANUAL MOUSE CALIBRATION
+            c2_bg = (65, 40, 18) if hover_manual else (42, 25, 12)
+            c2_border = (255, 160, 40) if hover_manual else (190, 110, 25)
+            pygame.draw.rect(screen, c2_bg, card_manual_rect, border_radius=12)
+            pygame.draw.rect(screen, c2_border, card_manual_rect, 3 if hover_manual else 2, border_radius=12)
+
+            t_m1 = font_heading.render("[2] MANUAL MOUSE CALIBRATION", True, (255, 180, 50))
+            t_m2 = font_regular.render("Interactive 4-corner mouse placement.", True, (255, 235, 215))
+            t_m3 = font_regular.render("Click directly on your screen corners in camera feed,", True, (230, 195, 170))
+            t_m4 = font_regular.render("then drag pins to align with millimeter precision.", True, (230, 195, 170))
+            t_m5 = font_bold.render("Click here or press [2] to start Manual", True, (255, 220, 80))
+
+            screen.blit(t_m1, (card_manual_rect.x + 25, card_manual_rect.y + 25))
+            screen.blit(t_m2, (card_manual_rect.x + 25, card_manual_rect.y + 68))
+            screen.blit(t_m3, (card_manual_rect.x + 25, card_manual_rect.y + 100))
+            screen.blit(t_m4, (card_manual_rect.x + 25, card_manual_rect.y + 125))
+            screen.blit(t_m5, (card_manual_rect.x + 25, card_manual_rect.y + 180))
+
+            hint_text = font_regular.render("[SPACE] Use 1:1 Default Bounds   |   [ESC] Exit", True, (130, 145, 165))
+            screen.blit(hint_text, (sw // 2 - hint_text.get_width() // 2, sh - 45))
+
+            pygame.display.flip()
+            clock.tick(30)
+
+        # =============================================================
+        # STEP 2: Execute Initial Setup Based on Mode
+        # =============================================================
+        pins = [
+            (25.0, 25.0),
+            (float(CAMERA_WIDTH - 25), 25.0),
+            (float(CAMERA_WIDTH - 25), float(CAMERA_HEIGHT - 25)),
+            (25.0, float(CAMERA_HEIGHT - 25))
+        ]
+        manual_click_mode = False
+        manual_step = 4  # 0 to 3 when placing points, 4 when all placed
+
+        if calib_mode == "auto":
+            print("[Calibration] Running Auto DocScanner Display Boundary Detection...")
+            # Flash high-contrast perimeter boundary for camera detection
             screen.fill((0, 0, 0))
+            # 35px white border around perimeter of screen
+            pygame.draw.rect(screen, (255, 255, 255), (0, 0, sw, sh), 35)
+            # Corner markers
+            pygame.draw.rect(screen, (255, 255, 255), (0, 0, 120, 120))
+            pygame.draw.rect(screen, (255, 255, 255), (sw - 120, 0, 120, 120))
+            pygame.draw.rect(screen, (255, 255, 255), (sw - 120, sh - 120, 120, 120))
+            pygame.draw.rect(screen, (255, 255, 255), (0, sh - 120, 120, 120))
             pygame.display.flip()
-            time.sleep(0.6)  # Let display backlight settle to full black
 
-            # Average 4 black frames to eliminate camera sensor thermal noise
-            black_accum = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.float32)
-            for _ in range(4):
-                f = camera.capture_frame().astype(np.float32)
-                black_accum += f
-                time.sleep(0.04)
-            black_baseline = (black_accum / 4.0).astype(np.uint8)
-            black_gray = cv2.cvtColor(black_baseline, cv2.COLOR_RGB2GRAY)
+            time.sleep(0.4)
 
-            # -------------------------------------------------------------
-            # Phase 2: Sequential Display Dot Targets
-            # Measured dynamically to current display size (sw, sh)
-            # ZERO center text, contour-based blob finding, & IR LED detection
-            # -------------------------------------------------------------
-            target_coords = get_calibration_points(sw, sh)
-            detector = IRDetector(threshold=CALIBRATION_IR_THRESHOLD)
+            # Try to detect DocScanner quad across several frames
+            auto_detected = None
+            for _ in range(6):
+                f = camera.capture_frame()
+                q = detect_docscanner_quad(f)
+                if q is not None:
+                    auto_detected = q
+                    break
+                time.sleep(0.05)
 
-            corner_labels = [
-                f"Point 1 of 4: TOP-LEFT Corner",
-                f"Point 2 of 4: TOP-RIGHT Corner",
-                f"Point 3 of 4: BOTTOM-RIGHT Corner",
-                f"Point 4 of 4: BOTTOM-LEFT Corner",
-                f"Validation: CENTER Target"
+            if auto_detected is not None:
+                pins = [tuple(p) for p in auto_detected]
+                print(f"[Calibration] Auto DocScanner successfully detected display edges!")
+            else:
+                print("[Calibration] Auto DocScanner could not distinguish borders; using standard bounds for manual adjustment.")
+
+        elif calib_mode == "manual":
+            print("[Calibration] Starting Manual Mouse Corner Pinning...")
+            manual_click_mode = True
+            manual_step = 0
+            pins = [
+                (float(CAMERA_WIDTH * 0.1), float(CAMERA_HEIGHT * 0.1)),
+                (float(CAMERA_WIDTH * 0.9), float(CAMERA_HEIGHT * 0.1)),
+                (float(CAMERA_WIDTH * 0.9), float(CAMERA_HEIGHT * 0.9)),
+                (float(CAMERA_WIDTH * 0.1), float(CAMERA_HEIGHT * 0.9))
             ]
 
-            for idx, (sx, sy) in enumerate(target_coords):
-                # Render Target Dot on Screen - ZERO CENTERED TEXT!
-                screen.fill((0, 0, 0))
+        # =============================================================
+        # STEP 3: Interactive Studio (Draggable Pins, Live Video, Fine-Tuning)
+        # =============================================================
+        # Responsive dimensions for camera feed and diagnostics panel
+        if sh >= 900:
+            cam_w = 640
+            cam_h = 480
+            gap = 35
+            card_w = min(740, sw - cam_w - gap - 60)
+            card_h = 480
+            btn_h = 68
+            content_y = 90
+        else:
+            cam_w = min(560, (sw - 80) // 2)
+            cam_h = int(cam_w * 0.75)
+            gap = 25
+            card_w = min(660, sw - cam_w - gap - 40)
+            card_h = cam_h
+            btn_h = 56
+            content_y = 65
 
-                # Draw prominent white calibration bullseye target
-                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 44)
-                pygame.draw.circle(screen, (0, 0, 0), (sx, sy), 10)
-                pygame.draw.line(screen, (255, 255, 255), (sx - 60, sy), (sx + 60, sy), 3)
-                pygame.draw.line(screen, (255, 255, 255), (sx, sy - 60), (sx, sy + 60), 3)
+        total_content_w = cam_w + gap + card_w
+        cam_x = max(20, (sw - total_content_w) // 2)
+        card_rect = pygame.Rect(cam_x + cam_w + gap, content_y, card_w, card_h)
 
-                # Localized non-centered label adjacent to the target
-                lbl_x = max(20, min(sw - 330, sx + 55 if sx < sw // 2 else sx - 320))
-                lbl_y = max(20, min(sh - 50, sy + 55 if sy < sh // 2 else sy - 50))
-                lbl_surf = font_sub.render(f"{corner_labels[idx]} [Aim Remote or Wait]", True, (255, 220, 80))
-                screen.blit(lbl_surf, (lbl_x, lbl_y))
-                pygame.display.flip()
+        # 4 Action buttons at the bottom
+        btn_y = content_y + cam_h + (22 if sh >= 900 else 14)
+        btn1_w = 300  # Accept
+        btn2_w = 260  # Auto Scan
+        btn3_w = 260  # Manual Click
+        btn4_w = 230  # Default Bounds
+        btn_gap = 16
+        total_btn_w = btn1_w + btn2_w + btn3_w + btn4_w + 3 * btn_gap
+        btn_start_x = max(15, (sw - total_btn_w) // 2)
 
-                time.sleep(0.25)
+        btn_accept_rect = pygame.Rect(btn_start_x, btn_y, btn1_w, btn_h)
+        btn_auto_rect = pygame.Rect(btn_start_x + btn1_w + btn_gap, btn_y, btn2_w, btn_h)
+        btn_manual_rect = pygame.Rect(btn_start_x + btn1_w + btn_gap + btn2_w + btn_gap, btn_y, btn3_w, btn_h)
+        btn_default_rect = pygame.Rect(btn_start_x + btn1_w + btn_gap + btn2_w + btn_gap + btn3_w + btn_gap, btn_y, btn4_w, btn_h)
+        footer_y = btn_y + btn_h + 10
 
-                detected_cam_pt = None
-                start_capture_time = time.time()
+        dragging_pin_idx = None
+        studio_active = True
 
-                # Interactive capture loop: listens for IR remote click, display dot, or keyboard bypass
-                while time.time() - start_capture_time < 1.8:
-                    for event in pygame.event.get():
-                        if event.type == pygame.QUIT:
-                            raise KeyboardInterrupt("Calibration aborted by user.")
-                        elif event.type == pygame.KEYDOWN:
-                            if event.key == pygame.K_ESCAPE:
-                                raise KeyboardInterrupt("Calibration aborted by user via ESC.")
-                            elif event.key == pygame.K_r:
-                                print("[Calibration] Recalibrate key pressed during target sequence. Restarting...")
-                                restart_calibration = True
-                                break
-                            elif event.key == pygame.K_SPACE:
-                                detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
-                                break
-                            elif event.key == pygame.K_s:
-                                ident = np.eye(3, dtype=np.float64)
-                                save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
-                                return ident
-                        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                            detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
-                            break
+        print("[Calibration] Entering Interactive Visual Studio (Draggable pins + Live Cam)...")
 
-                    if restart_calibration or detected_cam_pt is not None:
+        while studio_active:
+            mouse_pos = pygame.mouse.get_pos()
+            mx, my = mouse_pos
+
+            # Check if mouse is hovering over any of the 4 corner pins
+            hover_pin_idx = None
+            if not manual_click_mode:
+                for i in range(4):
+                    pin_scr_x = cam_x + int(pins[i][0] / CAMERA_WIDTH * cam_w)
+                    pin_scr_y = content_y + int(pins[i][1] / CAMERA_HEIGHT * cam_h)
+                    if np.hypot(mx - pin_scr_x, my - pin_scr_y) <= 20:
+                        hover_pin_idx = i
                         break
 
-                    # Capture frame from camera
-                    frame = camera.capture_frame()
+            hover_btn_accept = btn_accept_rect.collidepoint(mouse_pos)
+            hover_btn_auto = btn_auto_rect.collidepoint(mouse_pos)
+            hover_btn_manual = btn_manual_rect.collidepoint(mouse_pos)
+            hover_btn_default = btn_default_rect.collidepoint(mouse_pos)
 
-                    # Check A: Did user aim IR remote / pen at this corner?
-                    ir_pt = detector.detect(frame)
-                    if ir_pt is not None:
-                        detected_cam_pt = ir_pt
-                        print(f"[Calibration] Detected IR Light from remote/pen at: ({ir_pt[0]:.1f}, {ir_pt[1]:.1f})")
-                        break
+            # ---------------------------------------------------------
+            # Process Pygame Events & Mouse Dragging
+            # ---------------------------------------------------------
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise KeyboardInterrupt("Calibration aborted by user.")
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y):
+                        # Accept and proceed
+                        src_pts = np.array(pins, dtype=np.float32)
+                        homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
+                        if homography_matrix is None:
+                            homography_matrix = np.eye(3, dtype=np.float64)
+                        save_calibration(homography_matrix, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
+                        return homography_matrix
 
-                    # Check B: Did differential subtraction find the bright display dot?
-                    frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                    diff = cv2.absdiff(frame_gray, black_gray)
-                    diff_blur = cv2.GaussianBlur(diff, (5, 5), 0)
-                    _, diff_thresh = cv2.threshold(diff_blur, 28, 255, cv2.THRESH_BINARY)
-                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                    diff_clean = cv2.morphologyEx(diff_thresh, cv2.MORPH_OPEN, kernel)
-                    contours, _ = cv2.findContours(diff_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    elif event.key == pygame.K_a:
+                        # Re-run Auto DocScanner
+                        print("[Calibration] Auto DocScanner re-scan requested...")
+                        f = camera.capture_frame()
+                        q = detect_docscanner_quad(f)
+                        if q is not None:
+                            pins = [tuple(p) for p in q]
+                            print("[Calibration] DocScanner successfully re-aligned to display edges!")
+                        else:
+                            print("[Calibration] Could not detect display automatically. Use mouse to drag corner pins.")
 
-                    best_blob = None
-                    best_area = 0
-                    for c in contours:
-                        area = cv2.contourArea(c)
-                        if 15 <= area <= 30000:
-                            bx, by, bw, bh = cv2.boundingRect(c)
-                            aspect = float(bw) / max(bh, 1)
-                            if 0.35 <= aspect <= 2.8:
-                                if area > best_area:
-                                    best_area = area
-                                    M = cv2.moments(c)
-                                    if M["m00"] > 0:
-                                        best_blob = (float(M["m10"] / M["m00"]), float(M["m01"] / M["m00"]))
+                    elif event.key in (pygame.K_m, pygame.K_r):
+                        # Switch to manual sequential clicking
+                        manual_click_mode = True
+                        manual_step = 0
+                        print("[Calibration] Switched to Manual Click mode. Click the 4 corners in sequence.")
 
-                    if best_blob is not None:
-                        detected_cam_pt = best_blob
-                        print(f"[Calibration] Detected display dot blob (area: {best_area:.0f}) at: ({best_blob[0]:.1f}, {best_blob[1]:.1f})")
-                        break
+                    elif event.key == pygame.K_SPACE:
+                        # Reset to 1:1 default bounds
+                        pins = [
+                            (25.0, 25.0),
+                            (float(CAMERA_WIDTH - 25), 25.0),
+                            (float(CAMERA_WIDTH - 25), float(CAMERA_HEIGHT - 25)),
+                            (25.0, float(CAMERA_HEIGHT - 25))
+                        ]
+                        manual_click_mode = False
+                        manual_step = 4
 
-                    time.sleep(0.04)
+                    elif event.key == pygame.K_ESCAPE:
+                        raise KeyboardInterrupt("Calibration aborted by user via ESC.")
 
-                if restart_calibration:
-                    break
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    # Check button clicks
+                    if hover_btn_accept:
+                        src_pts = np.array(pins, dtype=np.float32)
+                        homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
+                        if homography_matrix is None:
+                            homography_matrix = np.eye(3, dtype=np.float64)
+                        save_calibration(homography_matrix, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
+                        return homography_matrix
 
-                # If neither IR light nor display dot was found after 1.8 seconds:
-                if detected_cam_pt is None:
-                    # Clean proportional corner mapping - NOT (320, 240)!
-                    detected_cam_pt = (float(sx / sw * CAMERA_WIDTH), float(sy / sh * CAMERA_HEIGHT))
-                    print(f"[Calibration] Camera did not detect dot. Using proportional mapping: ({detected_cam_pt[0]:.1f}, {detected_cam_pt[1]:.1f})")
+                    elif hover_btn_auto:
+                        f = camera.capture_frame()
+                        q = detect_docscanner_quad(f)
+                        if q is not None:
+                            pins = [tuple(p) for p in q]
+                            manual_click_mode = False
+                            manual_step = 4
+                            print("[Calibration] Auto DocScanner locked onto edges!")
+                        else:
+                            print("[Calibration] Could not detect quad. Use mouse to drag pins.")
 
-                camera_points.append(detected_cam_pt)
-                screen_points.append((sx, sy))
+                    elif hover_btn_manual:
+                        manual_click_mode = True
+                        manual_step = 0
+                        print("[Calibration] Click 4 display corners in sequence.")
 
-                # Green flash feedback for success
-                pygame.draw.circle(screen, (60, 255, 100), (sx, sy), 50, 4)
-                pygame.display.flip()
-                time.sleep(0.20)
+                    elif hover_btn_default:
+                        pins = [
+                            (25.0, 25.0),
+                            (float(CAMERA_WIDTH - 25), 25.0),
+                            (float(CAMERA_WIDTH - 25), float(CAMERA_HEIGHT - 25)),
+                            (25.0, float(CAMERA_HEIGHT - 25))
+                        ]
+                        manual_click_mode = False
+                        manual_step = 4
 
-            if restart_calibration:
-                screen.fill((0, 0, 0))
-                re_msg = font_title.render("RESTARTING CALIBRATION...", True, (255, 140, 50))
-                screen.blit(re_msg, (sw // 2 - re_msg.get_width() // 2, sh // 2 - 20))
-                pygame.display.flip()
-                time.sleep(0.8)
-                continue
+                    # Check clicking inside camera feed
+                    elif cam_x <= mx <= cam_x + cam_w and content_y <= my <= content_y + cam_h:
+                        cam_px = max(0.0, min(float(CAMERA_WIDTH - 1), (mx - cam_x) / cam_w * CAMERA_WIDTH))
+                        cam_py = max(0.0, min(float(CAMERA_HEIGHT - 1), (my - content_y) / cam_h * CAMERA_HEIGHT))
 
-            # -------------------------------------------------------------
-            # Phase 3: Compute Homography Matrix with Anti-Collapse Guard
-            # -------------------------------------------------------------
-            # Verify that the 4 corners form a wide, non-collapsed quadrilateral
-            is_valid_quad, guarded_pts = validate_corner_points(camera_points[:4], CAMERA_WIDTH, CAMERA_HEIGHT)
-            if not is_valid_quad:
-                print("[Calibration] WARNING: Points were collapsed or clustered in middle! Applying clean corner bounds.")
-                camera_points[:4] = guarded_pts
+                        if manual_click_mode:
+                            pins[manual_step] = (cam_px, cam_py)
+                            manual_step += 1
+                            c_names = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+                            print(f"[Calibration] Placed {c_names[manual_step-1]} pin at: ({cam_px:.1f}, {cam_py:.1f})")
+                            if manual_step >= 4:
+                                manual_click_mode = False
+                                print("[Calibration] All 4 corners placed! You can now drag any pin to fine-tune.")
+                        elif hover_pin_idx is not None:
+                            dragging_pin_idx = hover_pin_idx
 
-            src_pts = np.array(camera_points[:4], dtype=np.float32)
-            dst_pts = np.array(screen_points[:4], dtype=np.float32)
-            homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    dragging_pin_idx = None
 
-            if homography_matrix is None:
-                print("[Calibration] Warning: Homography computation failed, using 1:1 scale fallback.")
-                homography_matrix = np.eye(3, dtype=np.float64)
+                elif event.type == pygame.MOUSEMOTION:
+                    if dragging_pin_idx is not None:
+                        # Clamp dragging position within camera frame
+                        new_cx = max(0.0, min(float(CAMERA_WIDTH - 1), (mx - cam_x) / cam_w * CAMERA_WIDTH))
+                        new_cy = max(0.0, min(float(CAMERA_HEIGHT - 1), (my - content_y) / cam_h * CAMERA_HEIGHT))
+                        pins[dragging_pin_idx] = (new_cx, new_cy)
 
-            # Validation with center point
-            val_error = 0.0
-            if len(camera_points) >= 5:
-                center_cam = np.array([[[camera_points[4][0], camera_points[4][1]]]], dtype=np.float32)
-                proj_center = cv2.perspectiveTransform(center_cam, homography_matrix)[0][0]
-                val_error = float(np.hypot(proj_center[0] - screen_points[4][0], proj_center[1] - screen_points[4][1]))
-                print(f"[Calibration] Center validation error: {val_error:.1f} px")
-
+            # ---------------------------------------------------------
+            # Compute Live Homography & Edge Measurements
+            # ---------------------------------------------------------
+            src_pts = np.array(pins, dtype=np.float32)
             disp_corners = src_pts.astype(np.int32)
             is_convex = bool(cv2.isContourConvex(disp_corners.reshape(-1, 1, 2)))
 
-            # Print calibration diagnostics to console
-            print("\n" + "=" * 70)
-            print("[Calibration] DISPLAY EDGES CALIBRATION COMPLETE!")
-            print("[Calibration] DocScanner Display Quadrilateral Corners in Camera View:")
-            c_names = ["Top-Left (TL)", "Top-Right (TR)", "Bottom-Right (BR)", "Bottom-Left (BL)"]
-            for i, c_name in enumerate(c_names):
-                print(f"  • {c_name:<18}: Camera ({camera_points[i][0]:.1f}, {camera_points[i][1]:.1f}) -> Display {screen_points[i]}")
-            if len(camera_points) >= 5:
-                print(f"  • Screen Center (CC) : Camera ({camera_points[4][0]:.1f}, {camera_points[4][1]:.1f}) -> Display {screen_points[4]}")
-            print(f"[Calibration] Reprojection Error: {val_error:.2f} px")
-            print(f"[Calibration] Geometry Status   : {'CONVEX & VALID QUAD' if is_convex else 'WARNING: DISTORTED / SKEWED QUAD'}")
-            print("[Calibration] Reviewing on screen. Waiting for user decision:")
-            print("  -> Press [ENTER] (or click 'Accept & Continue') to proceed to Whiteboard.")
-            print("  -> Press [R]     (or click 'Recalibrate Again') if edges look misaligned.")
-            print("  -> Press [SPACE] (or click 'Default Bounds') for standard 1:1 camera bounds.")
-            print("=" * 70 + "\n")
+            w_top = float(np.hypot(pins[1][0] - pins[0][0], pins[1][1] - pins[0][1]))
+            w_btm = float(np.hypot(pins[2][0] - pins[3][0], pins[2][1] - pins[3][1]))
+            h_left = float(np.hypot(pins[3][0] - pins[0][0], pins[3][1] - pins[0][1]))
+            h_right = float(np.hypot(pins[2][0] - pins[1][0], pins[2][1] - pins[1][1]))
+            avg_w = (w_top + w_btm) / 2.0
+            avg_h = (h_left + h_right) / 2.0
+            aspect = avg_w / max(avg_h, 1.0)
 
-            # -------------------------------------------------------------
-            # Phase 4: Interactive DocScanner Review Screen
-            # Shows live camera view, DocScanner edges, telemetry card,
-            # and asks user to Accept or Recalibrate without auto-timeout.
-            # -------------------------------------------------------------
-            if sh >= 900:
-                prev_w = 640
-                prev_h = 480
-                gap = 35
-                card_w = min(740, sw - prev_w - gap - 60)
-                card_h = 480
-                btn_h = 70
-            else:
-                prev_w = 520
-                prev_h = 390
-                gap = 25
-                card_w = min(660, sw - prev_w - gap - 40)
-                card_h = 390
-                btn_h = 58
+            # ---------------------------------------------------------
+            # Capture Live Camera Frame & Render Overlay
+            # ---------------------------------------------------------
+            try:
+                live_frame = camera.capture_frame()
+            except Exception:
+                live_frame = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
 
-            total_content_w = prev_w + gap + card_w
-            start_x = max(20, (sw - total_content_w) // 2)
-            content_y = 95 if sh >= 900 else 75
+            annotated = live_frame.copy()
 
-            cam_rect = (start_x, content_y, prev_w, prev_h)
-            card_rect = pygame.Rect(start_x + prev_w + gap, content_y, card_w, card_h)
+            # Semi-transparent polygon overlay for the display zone
+            overlay = annotated.copy()
+            cv2.fillPoly(overlay, [disp_corners], color=(20, 60, 40))
+            cv2.addWeighted(overlay, 0.28, annotated, 0.72, 0, annotated)
 
-            btn_y = content_y + prev_h + (25 if sh >= 900 else 15)
-            btn1_w = 340
-            btn2_w = 340
-            btn3_w = 260
-            btn_gap = 20
-            total_btn_w = btn1_w + btn2_w + btn3_w + 2 * btn_gap
-            btn_start_x = max(20, (sw - total_btn_w) // 2)
+            # Draw 4 DocScanner edges
+            cv2.polylines(annotated, [disp_corners], isClosed=True, color=(0, 245, 255), thickness=3)
 
-            btn_accept_rect = pygame.Rect(btn_start_x, btn_y, btn1_w, btn_h)
-            btn_recalib_rect = pygame.Rect(btn_start_x + btn1_w + btn_gap, btn_y, btn2_w, btn_h)
-            btn_default_rect = pygame.Rect(btn_start_x + btn1_w + btn_gap + btn2_w + btn_gap, btn_y, btn3_w, btn_h)
-            footer_y = btn_y + btn_h + 12
+            # Diagonals & Center
+            cv2.line(annotated, tuple(disp_corners[0]), tuple(disp_corners[2]), (80, 100, 120), 1)
+            cv2.line(annotated, tuple(disp_corners[1]), tuple(disp_corners[3]), (80, 100, 120), 1)
+            center_x = int((disp_corners[0][0] + disp_corners[2][0]) // 2)
+            center_y = int((disp_corners[0][1] + disp_corners[2][1]) // 2)
+            cv2.drawMarker(annotated, (center_x, center_y), (0, 255, 255), cv2.MARKER_CROSS, 16, 2)
 
-            review_active = True
-            recalibrate_requested = False
+            # Draw 4 Draggable Corner Pins with badges
+            pin_info = [
+                ("TL", (60, 255, 100)),   # Green
+                ("TR", (255, 220, 40)),   # Yellow
+                ("BR", (255, 140, 40)),   # Orange
+                ("BL", (0, 200, 255))     # Cyan
+            ]
+            for i, (tag, col) in enumerate(pin_info):
+                px, py = int(disp_corners[i][0]), int(disp_corners[i][1])
+                is_pin_dragged = (dragging_pin_idx == i)
+                is_pin_hovered = (hover_pin_idx == i)
 
-            while review_active:
-                mouse_pos = pygame.mouse.get_pos()
+                rad = 14 if (is_pin_dragged or is_pin_hovered) else 10
+                cv2.circle(annotated, (px, py), rad, col, -1)
+                cv2.circle(annotated, (px, py), rad + 4, (255, 255, 255), 2)
+                if is_pin_dragged or is_pin_hovered:
+                    cv2.circle(annotated, (px, py), rad + 8, col, 2)
 
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        raise KeyboardInterrupt("Calibration aborted by user.")
-                    elif event.type == pygame.KEYDOWN:
-                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y):
-                            print(f"[Calibration] Calibration accepted by user via [ENTER] for {sw}x{sh} display. Saving...")
-                            save_calibration(homography_matrix, error_px=val_error, screen_resolution=(sw, sh), points=target_coords)
-                            return homography_matrix
-                        elif event.key == pygame.K_r:
-                            print("[Calibration] Recalibrate key [R] pressed by user. Restarting calibration...")
-                            recalibrate_requested = True
-                            review_active = False
-                            break
-                        elif event.key == pygame.K_SPACE:
-                            print(f"[Calibration] User selected default 1:1 bounds via [SPACE] for {sw}x{sh} display.")
-                            ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
-                            return ident
-                        elif event.key == pygame.K_ESCAPE:
-                            raise KeyboardInterrupt("Calibration aborted by user via ESC.")
-                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        if btn_accept_rect.collidepoint(mouse_pos):
-                            print(f"[Calibration] Calibration accepted by user via [Accept] button for {sw}x{sh} display. Saving...")
-                            save_calibration(homography_matrix, error_px=val_error, screen_resolution=(sw, sh), points=target_coords)
-                            return homography_matrix
-                        elif btn_recalib_rect.collidepoint(mouse_pos):
-                            print("[Calibration] User clicked [Recalibrate Again]. Restarting calibration...")
-                            recalibrate_requested = True
-                            review_active = False
-                            break
-                        elif btn_default_rect.collidepoint(mouse_pos):
-                            print(f"[Calibration] User clicked [Default Bounds] for {sw}x{sh} display.")
-                            ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0, screen_resolution=(sw, sh), points=target_coords)
-                            return ident
+                off_x = 12 if i in (0, 3) else -85
+                off_y = -12 if i in (0, 1) else 24
+                cv2.putText(annotated, f"{tag}: ({px},{py})", (px + off_x, py + off_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 3)
+                cv2.putText(annotated, f"{tag}: ({px},{py})", (px + off_x, py + off_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, col, 1)
 
-                if not review_active:
-                    break
+            # Edge length text
+            top_mid = ((disp_corners[0][0] + disp_corners[1][0]) // 2, (disp_corners[0][1] + disp_corners[1][1]) // 2)
+            cv2.putText(annotated, f"Top: {w_top:.0f}px", (top_mid[0] - 35, top_mid[1] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
 
-                # Capture live camera frame
-                try:
-                    live_frame = camera.capture_frame()
-                except Exception:
-                    live_frame = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
+            btm_mid = ((disp_corners[3][0] + disp_corners[2][0]) // 2, (disp_corners[3][1] + disp_corners[2][1]) // 2)
+            cv2.putText(annotated, f"Btm: {w_btm:.0f}px", (btm_mid[0] - 35, btm_mid[1] + 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
 
-                annotated = live_frame.copy()
+            left_mid = ((disp_corners[0][0] + disp_corners[3][0]) // 2, (disp_corners[0][1] + disp_corners[3][1]) // 2)
+            cv2.putText(annotated, f"L: {h_left:.0f}px", (left_mid[0] - 55, left_mid[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
 
-                # Semi-transparent polygon overlay for display area
-                overlay = annotated.copy()
-                cv2.fillPoly(overlay, [disp_corners], color=(20, 60, 40))
-                cv2.addWeighted(overlay, 0.28, annotated, 0.72, 0, annotated)
+            right_mid = ((disp_corners[1][0] + disp_corners[2][0]) // 2, (disp_corners[1][1] + disp_corners[2][1]) // 2)
+            cv2.putText(annotated, f"R: {h_right:.0f}px", (right_mid[0] + 8, right_mid[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
 
-                # Draw 4 DocScanner edges in bright neon cyan
-                cv2.polylines(annotated, [disp_corners], isClosed=True, color=(0, 245, 255), thickness=3)
+            # ---------------------------------------------------------
+            # Render Pygame UI & Diagnostics
+            # ---------------------------------------------------------
+            screen.fill((14, 17, 24))
 
-                # Draw corner diagonal guide lines
-                cv2.line(annotated, tuple(disp_corners[0]), tuple(disp_corners[2]), (80, 100, 120), 1)
-                cv2.line(annotated, tuple(disp_corners[1]), tuple(disp_corners[3]), (80, 100, 120), 1)
-
-                # Center Point marker
-                if len(camera_points) >= 5:
-                    cx_c, cy_c = int(camera_points[4][0]), int(camera_points[4][1])
-                    cv2.drawMarker(annotated, (cx_c, cy_c), (0, 255, 255), cv2.MARKER_CROSS, 16, 2)
-                    cv2.circle(annotated, (cx_c, cy_c), 5, (0, 255, 255), 1)
-                    cv2.putText(annotated, f"CENTER ({cx_c},{cy_c})", (cx_c + 8, cy_c - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1)
-
-                # Draw corner pins with colorful badges
-                corner_tags = [
-                    ("TL", (60, 255, 100)),   # Green
-                    ("TR", (255, 220, 40)),   # Yellow
-                    ("BR", (255, 140, 40)),   # Orange
-                    ("BL", (0, 200, 255))     # Cyan
+            # Header & Status
+            title_surf = font_title.render("DISPLAY CALIBRATION STUDIO — DOCSCANNER & MANUAL EDGES", True, (40, 240, 180))
+            if manual_click_mode:
+                c_prompts = [
+                    "Step 1/4: Click on the TOP-LEFT corner of your physical display in the camera feed",
+                    "Step 2/4: Click on the TOP-RIGHT corner of your physical display in the camera feed",
+                    "Step 3/4: Click on the BOTTOM-RIGHT corner of your physical display in the camera feed",
+                    "Step 4/4: Click on the BOTTOM-LEFT corner of your physical display in the camera feed"
                 ]
-
-                for i, (tag, col) in enumerate(corner_tags):
-                    px, py = int(disp_corners[i][0]), int(disp_corners[i][1])
-                    cv2.circle(annotated, (px, py), 9, col, -1)
-                    cv2.circle(annotated, (px, py), 13, (255, 255, 255), 2)
-                    off_x = 10 if i in (0, 3) else -80
-                    off_y = -10 if i in (0, 1) else 22
-                    cv2.putText(annotated, f"{tag}: ({px},{py})", (px + off_x, py + off_y),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 3)
-                    cv2.putText(annotated, f"{tag}: ({px},{py})", (px + off_x, py + off_y),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.46, col, 1)
-
-                # Edge dimensions in camera pixels
-                top_mid = ((disp_corners[0][0] + disp_corners[1][0]) // 2, (disp_corners[0][1] + disp_corners[1][1]) // 2)
-                w_top = float(np.hypot(disp_corners[1][0] - disp_corners[0][0], disp_corners[1][1] - disp_corners[0][1]))
-                cv2.putText(annotated, f"Top: {w_top:.0f}px", (top_mid[0] - 35, top_mid[1] - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
-
-                btm_mid = ((disp_corners[3][0] + disp_corners[2][0]) // 2, (disp_corners[3][1] + disp_corners[2][1]) // 2)
-                w_btm = float(np.hypot(disp_corners[2][0] - disp_corners[3][0], disp_corners[2][1] - disp_corners[3][1]))
-                cv2.putText(annotated, f"Btm: {w_btm:.0f}px", (btm_mid[0] - 35, btm_mid[1] + 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
-
-                left_mid = ((disp_corners[0][0] + disp_corners[3][0]) // 2, (disp_corners[0][1] + disp_corners[3][1]) // 2)
-                h_left = float(np.hypot(disp_corners[3][0] - disp_corners[0][0], disp_corners[3][1] - disp_corners[0][1]))
-                cv2.putText(annotated, f"L: {h_left:.0f}px", (left_mid[0] - 55, left_mid[1] + 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
-
-                right_mid = ((disp_corners[1][0] + disp_corners[2][0]) // 2, (disp_corners[1][1] + disp_corners[2][1]) // 2)
-                h_right = float(np.hypot(disp_corners[2][0] - disp_corners[1][0], disp_corners[2][1] - disp_corners[1][1]))
-                cv2.putText(annotated, f"R: {h_right:.0f}px", (right_mid[0] + 8, right_mid[1] + 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 245, 255), 1)
-
-                # Render background & Header
-                screen.fill((14, 17, 24))
-
-                title_surf = font_title.render("CALIBRATION COMPLETE — REVIEW DISPLAY EDGES", True, (40, 240, 180))
+                sub_surf = font_sub.render(c_prompts[min(manual_step, 3)], True, (255, 220, 80))
+            elif dragging_pin_idx is not None:
+                tag_name = pin_info[dragging_pin_idx][0]
+                sub_surf = font_sub.render(f"DRAGGING [{tag_name}] CORNER: Move mouse to align pin with monitor edge", True, (60, 255, 120))
+            else:
                 sub_surf = font_sub.render(
-                    "The 4 edges of your display (DocScanner Quad) are shown below. Verify alignment with your physical screen.",
+                    "Review edges below. Click and drag any corner pin (TL, TR, BR, BL) with mouse to fine-tune alignment.",
                     True, (200, 215, 235)
                 )
-                screen.blit(title_surf, (sw // 2 - title_surf.get_width() // 2, 20 if sh >= 900 else 12))
-                screen.blit(sub_surf, (sw // 2 - sub_surf.get_width() // 2, 58 if sh >= 900 else 42))
 
-                # Blit live camera preview on left
-                frame_resized = cv2.resize(annotated, (prev_w, prev_h))
-                frame_surf = pygame.image.frombuffer(frame_resized.tobytes(), (prev_w, prev_h), 'RGB')
-                pygame.draw.rect(screen, (0, 240, 255), (start_x - 2, content_y - 2, prev_w + 4, prev_h + 4), 2, border_radius=6)
-                screen.blit(frame_surf, (start_x, content_y))
+            screen.blit(title_surf, (sw // 2 - title_surf.get_width() // 2, 18 if sh >= 900 else 10))
+            screen.blit(sub_surf, (sw // 2 - sub_surf.get_width() // 2, 54 if sh >= 900 else 38))
 
-                cam_label = font_bold.render("LIVE CAMERA FEED — DOCSCANNER DISPLAY BOUNDARY", True, (0, 240, 255))
-                screen.blit(cam_label, (start_x + 10, content_y + 10))
+            # Camera View (with interactive pins)
+            frame_resized = cv2.resize(annotated, (cam_w, cam_h))
+            frame_surf = pygame.image.frombuffer(frame_resized.tobytes(), (cam_w, cam_h), 'RGB')
+            pygame.draw.rect(screen, (0, 240, 255), (cam_x - 2, content_y - 2, cam_w + 4, cam_h + 4), 2, border_radius=6)
+            screen.blit(frame_surf, (cam_x, content_y))
 
-                # Blit Diagnostics Card on right
-                pygame.draw.rect(screen, (20, 24, 34), card_rect, border_radius=8)
-                pygame.draw.rect(screen, (50, 65, 90), card_rect, 2, border_radius=8)
+            cam_badge = "MANUAL CLICK MODE: CLICK CORNER" if manual_click_mode else "DRAGGABLE PINS ACTIVE: DRAG WITH MOUSE"
+            cam_badge_surf = font_bold.render(cam_badge, True, (255, 220, 80) if manual_click_mode else (0, 240, 255))
+            screen.blit(cam_badge_surf, (cam_x + 10, content_y + 10))
 
-                # Card Header
-                card_hdr = font_heading.render("CALIBRATION METRICS & TELEMETRY", True, (255, 220, 80))
-                screen.blit(card_hdr, (card_rect.x + 20, card_rect.y + 14))
+            # Diagnostics Card on Right
+            pygame.draw.rect(screen, (20, 24, 34), card_rect, border_radius=8)
+            pygame.draw.rect(screen, (50, 65, 90), card_rect, 2, border_radius=8)
 
-                # Quality Status Badge
-                if is_convex and val_error <= 6.0:
-                    badge_text = f"ALIGNMENT: EXCELLENT (Validation Error: {val_error:.1f} px)"
-                    badge_col = (60, 255, 100)
-                elif is_convex and val_error <= 15.0:
-                    badge_text = f"ALIGNMENT: GOOD (Validation Error: {val_error:.1f} px)"
-                    badge_col = (255, 220, 60)
-                else:
-                    badge_text = f"ALIGNMENT: DISTORTED / SKEWED (Error: {val_error:.1f} px - Recalibration Recommended)"
-                    badge_col = (255, 100, 60)
+            card_hdr = font_heading.render("DISPLAY CORNER TELEMETRY", True, (255, 220, 80))
+            screen.blit(card_hdr, (card_rect.x + 20, card_rect.y + 14))
 
-                badge_surf = font_bold.render(badge_text, True, badge_col)
-                screen.blit(badge_surf, (card_rect.x + 20, card_rect.y + 44))
+            # Status Badge
+            if is_convex and min(w_top, w_btm, h_left, h_right) > 80:
+                badge_text = "STATUS: VALID DISPLAY QUAD (Accurate & Ready)"
+                badge_col = (60, 255, 100)
+            else:
+                badge_text = "STATUS: DISTORTED / SKEWED (Adjust corner pins)"
+                badge_col = (255, 120, 50)
 
-                # Corner Coordinates Table
-                line_y = card_rect.y + 76
-                t_lines = [
-                    f"Top-Left     [TL] : Camera ({camera_points[0][0]:.1f}, {camera_points[0][1]:.1f})  ->  Display ({target_coords[0][0]}, {target_coords[0][1]})",
-                    f"Top-Right    [TR] : Camera ({camera_points[1][0]:.1f}, {camera_points[1][1]:.1f})  ->  Display ({target_coords[1][0]}, {target_coords[1][1]})",
-                    f"Bottom-Right [BR] : Camera ({camera_points[2][0]:.1f}, {camera_points[2][1]:.1f})  ->  Display ({target_coords[2][0]}, {target_coords[2][1]})",
-                    f"Bottom-Left  [BL] : Camera ({camera_points[3][0]:.1f}, {camera_points[3][1]:.1f})  ->  Display ({target_coords[3][0]}, {target_coords[3][1]})",
-                ]
-                if len(camera_points) >= 5:
-                    t_lines.append(f"Screen Center[CC] : Camera ({camera_points[4][0]:.1f}, {camera_points[4][1]:.1f})  ->  Display ({target_coords[4][0]}, {target_coords[4][1]})")
+            badge_surf = font_bold.render(badge_text, True, badge_col)
+            screen.blit(badge_surf, (card_rect.x + 20, card_rect.y + 44))
 
-                for tl in t_lines:
-                    ts = font_mono.render(tl, True, (210, 225, 245))
-                    screen.blit(ts, (card_rect.x + 20, line_y))
-                    line_y += 22
-
-                line_y += 6
-                # Dimensions & Aspect Ratio
-                avg_w = (w_top + w_btm) / 2.0
-                avg_h = (h_left + h_right) / 2.0
-                aspect = avg_w / max(avg_h, 1.0)
-                dim_lines = [
-                    f"Edge Widths  : Top: {w_top:.0f} px  |  Bottom: {w_btm:.0f} px",
-                    f"Edge Heights : Left: {h_left:.0f} px  |  Right: {h_right:.0f} px",
-                    f"Aspect Ratio : {aspect:.2f} : 1.0 (Display Native: {sw/sh:.2f} : 1.0)"
-                ]
-                for dl in dim_lines:
-                    ds = font_mono.render(dl, True, (170, 195, 225))
-                    screen.blit(ds, (card_rect.x + 20, line_y))
-                    line_y += 20
-
-                line_y += 10
-                # User Guidance Box
-                g_title = font_bold.render("VERIFICATION & ACCURACY CHECK:", True, (255, 200, 60))
-                screen.blit(g_title, (card_rect.x + 20, line_y))
+            # Corner Table
+            line_y = card_rect.y + 76
+            t_lines = [
+                f"Top-Left     [TL] : Camera ({pins[0][0]:.1f}, {pins[0][1]:.1f})  ->  Display ({target_coords[0][0]}, {target_coords[0][1]})",
+                f"Top-Right    [TR] : Camera ({pins[1][0]:.1f}, {pins[1][1]:.1f})  ->  Display ({target_coords[1][0]}, {target_coords[1][1]})",
+                f"Bottom-Right [BR] : Camera ({pins[2][0]:.1f}, {pins[2][1]:.1f})  ->  Display ({target_coords[2][0]}, {target_coords[2][1]})",
+                f"Bottom-Left  [BL] : Camera ({pins[3][0]:.1f}, {pins[3][1]:.1f})  ->  Display ({target_coords[3][0]}, {target_coords[3][1]})",
+            ]
+            for tl in t_lines:
+                ts = font_mono.render(tl, True, (210, 225, 245))
+                screen.blit(ts, (card_rect.x + 20, line_y))
                 line_y += 22
 
-                guidelines = [
-                    "• Look at live camera feed: Does the cyan polygon frame your physical display?",
-                    "• Are all 4 corner pins (TL, TR, BR, BL) on your monitor screen corners?",
-                    "• If accurate -> Click [Accept & Continue] or press [ENTER].",
-                    "• If calibration didn't happen properly -> Click [Recalibrate Again] or press [R]."
-                ]
-                for g in guidelines:
-                    is_action = "Recalibrate" in g or "Accept" in g
-                    gs = font_regular.render(g, True, (220, 230, 245) if is_action else (175, 185, 200))
-                    screen.blit(gs, (card_rect.x + 20, line_y))
-                    line_y += 20
+            line_y += 6
+            dim_lines = [
+                f"Edge Widths  : Top: {w_top:.0f} px  |  Bottom: {w_btm:.0f} px",
+                f"Edge Heights : Left: {h_left:.0f} px  |  Right: {h_right:.0f} px",
+                f"Aspect Ratio : {aspect:.2f} : 1.0 (Display Native: {sw/sh:.2f} : 1.0)"
+            ]
+            for dl in dim_lines:
+                ds = font_mono.render(dl, True, (170, 195, 225))
+                screen.blit(ds, (card_rect.x + 20, line_y))
+                line_y += 20
 
-                # Draw Interactive Buttons with Hover Highlights
-                # Button 1: Accept & Continue
-                h1 = btn_accept_rect.collidepoint(mouse_pos)
-                pygame.draw.rect(screen, (35, 135, 65) if h1 else (20, 85, 40), btn_accept_rect, border_radius=8)
-                pygame.draw.rect(screen, (100, 255, 140) if h1 else (50, 200, 90), btn_accept_rect, 2, border_radius=8)
-                m1 = font_btn_title.render("[ENTER] Accept & Continue", True, (255, 255, 255))
-                s1 = font_btn_sub.render("Edges look accurate - Launch Whiteboard", True, (200, 255, 220))
-                screen.blit(m1, (btn_accept_rect.centerx - m1.get_width() // 2, btn_accept_rect.y + (12 if sh >= 900 else 8)))
-                screen.blit(s1, (btn_accept_rect.centerx - s1.get_width() // 2, btn_accept_rect.y + (38 if sh >= 900 else 32)))
+            line_y += 10
+            g_title = font_bold.render("ALIGNMENT INSTRUCTIONS:", True, (255, 200, 60))
+            screen.blit(g_title, (card_rect.x + 20, line_y))
+            line_y += 22
 
-                # Button 2: Recalibrate Again
-                h2 = btn_recalib_rect.collidepoint(mouse_pos)
-                pygame.draw.rect(screen, (160, 50, 30) if h2 else (105, 35, 20), btn_recalib_rect, border_radius=8)
-                pygame.draw.rect(screen, (255, 140, 80) if h2 else (220, 90, 50), btn_recalib_rect, 2, border_radius=8)
-                m2 = font_btn_title.render("[R] Recalibrate Again", True, (255, 255, 255))
-                s2 = font_btn_sub.render("Didn't calibrate properly? Click to redo", True, (255, 215, 205))
-                screen.blit(m2, (btn_recalib_rect.centerx - m2.get_width() // 2, btn_recalib_rect.y + (12 if sh >= 900 else 8)))
-                screen.blit(s2, (btn_recalib_rect.centerx - s2.get_width() // 2, btn_recalib_rect.y + (38 if sh >= 900 else 32)))
+            instructions = [
+                "• Click and drag any corner pin (TL, TR, BR, BL) to match your screen edges.",
+                "• Click [Auto DocScanner Scan] to re-detect display edges automatically.",
+                "• Click [Manual Re-Click] to re-place the 4 corners in sequence.",
+                "• When edges frame your display, click [Accept & Continue] or press [ENTER]."
+            ]
+            for g in instructions:
+                is_primary = "Accept" in g or "drag" in g
+                gs = font_regular.render(g, True, (225, 235, 250) if is_primary else (175, 185, 200))
+                screen.blit(gs, (card_rect.x + 20, line_y))
+                line_y += 20
 
-                # Button 3: Default Bounds (1:1)
-                h3 = btn_default_rect.collidepoint(mouse_pos)
-                pygame.draw.rect(screen, (45, 65, 95) if h3 else (30, 45, 70), btn_default_rect, border_radius=8)
-                pygame.draw.rect(screen, (130, 180, 240) if h3 else (80, 115, 170), btn_default_rect, 2, border_radius=8)
-                m3 = font_btn_title.render("[SPACE] Default Bounds", True, (255, 255, 255))
-                s3 = font_btn_sub.render("Standard 1:1 mapping (PC bypass)", True, (180, 210, 245))
-                screen.blit(m3, (btn_default_rect.centerx - m3.get_width() // 2, btn_default_rect.y + (12 if sh >= 900 else 8)))
-                screen.blit(s3, (btn_default_rect.centerx - s3.get_width() // 2, btn_default_rect.y + (38 if sh >= 900 else 32)))
+            # ---------------------------------------------------------
+            # Render Action Buttons with Hover Effects
+            # ---------------------------------------------------------
+            # Button 1: Accept & Continue
+            pygame.draw.rect(screen, (35, 135, 65) if hover_btn_accept else (20, 85, 40), btn_accept_rect, border_radius=8)
+            pygame.draw.rect(screen, (100, 255, 140) if hover_btn_accept else (50, 200, 90), btn_accept_rect, 2, border_radius=8)
+            m1 = font_btn_title.render("[ENTER] Accept & Continue", True, (255, 255, 255))
+            s1 = font_btn_sub.render("Edges aligned - Launch Whiteboard", True, (200, 255, 220))
+            screen.blit(m1, (btn_accept_rect.centerx - m1.get_width() // 2, btn_accept_rect.y + (12 if sh >= 900 else 8)))
+            screen.blit(s1, (btn_accept_rect.centerx - s1.get_width() // 2, btn_accept_rect.y + (36 if sh >= 900 else 30)))
 
-                # Footer
-                footer_text = font_regular.render(
-                    "Hotkeys: [ENTER] Accept & Continue  |  [R] Recalibrate Again  |  [SPACE] Default Bounds  |  [ESC] Exit",
-                    True, (140, 155, 175)
-                )
-                screen.blit(footer_text, (sw // 2 - footer_text.get_width() // 2, footer_y))
+            # Button 2: Auto DocScanner Scan
+            pygame.draw.rect(screen, (15, 80, 105) if hover_btn_auto else (10, 48, 65), btn_auto_rect, border_radius=8)
+            pygame.draw.rect(screen, (0, 220, 255) if hover_btn_auto else (0, 160, 195), btn_auto_rect, 2, border_radius=8)
+            m2 = font_btn_title.render("[A] Auto DocScanner Scan", True, (255, 255, 255))
+            s2 = font_btn_sub.render("Scan camera for screen edges", True, (190, 240, 255))
+            screen.blit(m2, (btn_auto_rect.centerx - m2.get_width() // 2, btn_auto_rect.y + (12 if sh >= 900 else 8)))
+            screen.blit(s2, (btn_auto_rect.centerx - s2.get_width() // 2, btn_auto_rect.y + (36 if sh >= 900 else 30)))
 
-                pygame.display.flip()
-                clock.tick(30)
+            # Button 3: Manual Re-Click Corners
+            pygame.draw.rect(screen, (120, 65, 20) if hover_btn_manual else (75, 40, 15), btn_manual_rect, border_radius=8)
+            pygame.draw.rect(screen, (255, 170, 50) if hover_btn_manual else (205, 125, 35), btn_manual_rect, 2, border_radius=8)
+            m3 = font_btn_title.render("[M] Manual Re-Click", True, (255, 255, 255))
+            s3 = font_btn_sub.render("Click 4 corners in sequence", True, (255, 225, 195))
+            screen.blit(m3, (btn_manual_rect.centerx - m3.get_width() // 2, btn_manual_rect.y + (12 if sh >= 900 else 8)))
+            screen.blit(s3, (btn_manual_rect.centerx - s3.get_width() // 2, btn_manual_rect.y + (36 if sh >= 900 else 30)))
 
-            # If recalibration was requested, restart the loop cleanly
-            if recalibrate_requested:
-                screen.fill((0, 0, 0))
-                re_msg = font_title.render("RESTARTING CALIBRATION...", True, (255, 140, 50))
-                re_sub = font_instruction.render("Resetting display and capturing baseline...", True, (220, 230, 245))
-                screen.blit(re_msg, (sw // 2 - re_msg.get_width() // 2, sh // 2 - 30))
-                screen.blit(re_sub, (sw // 2 - re_sub.get_width() // 2, sh // 2 + 15))
-                pygame.display.flip()
-                time.sleep(1.0)
-                continue
+            # Button 4: Default 1:1 Bounds
+            pygame.draw.rect(screen, (45, 65, 95) if hover_btn_default else (30, 45, 70), btn_default_rect, border_radius=8)
+            pygame.draw.rect(screen, (130, 180, 240) if hover_btn_default else (80, 115, 170), btn_default_rect, 2, border_radius=8)
+            m4 = font_btn_title.render("[SPACE] Default Bounds", True, (255, 255, 255))
+            s4 = font_btn_sub.render("Reset to 1:1 full camera", True, (180, 210, 245))
+            screen.blit(m4, (btn_default_rect.centerx - m4.get_width() // 2, btn_default_rect.y + (12 if sh >= 900 else 8)))
+            screen.blit(s4, (btn_default_rect.centerx - s4.get_width() // 2, btn_default_rect.y + (36 if sh >= 900 else 30)))
+
+            # Footer
+            footer_text = font_regular.render(
+                "Controls: Drag pins with mouse  |  [ENTER] Accept  |  [A] Auto Scan  |  [M] Manual Click  |  [SPACE] Default  |  [ESC] Exit",
+                True, (140, 155, 175)
+            )
+            screen.blit(footer_text, (sw // 2 - footer_text.get_width() // 2, footer_y))
+
+            pygame.display.flip()
+            clock.tick(30)
 
     finally:
         if owns_screen:

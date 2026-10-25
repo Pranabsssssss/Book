@@ -92,26 +92,29 @@ The system does **NOT** assume a fixed 1920×1080 display. It automatically meas
   - Center: `(width // 2, height // 2)`
 - **Adaptive UI Controls**: On-screen ERASER and SAVE buttons are dynamically anchored to the bottom-right corner of the active display with proportional margins, guaranteeing they are always visible and accessible.
 
-### Differential Dots Display Calibration & Live Edge Review
-The calibration maps your monitor's display boundaries to the camera view using automated **Differential Dots Calibration** (DocScanner Quad calculation):
-- **Automated Target Dots on Display Edges**: The monitor displays a full black screen, captures a baseline camera frame, and then flashes white calibration targets one by one at each corner:
-  1. Top-Left corner: `(50, 50)`
-  2. Top-Right corner: `(W-50, 50)`
-  3. Bottom-Right corner: `(W-50, H-50)`
-  4. Bottom-Left corner: `(50, H-50)`
-  5. Center verification point: `(W/2, H/2)`
-- **Differential Background Subtraction**: Uses `cv2.absdiff(dot_frame, black_baseline)` to cancel out 100% of room lighting, ceiling lamps, and ambient reflections.
-- **Sub-Pixel Centroid Precision**: Calculates exact sub-pixel centroids `(cx, cy)` from the differential moments, eliminating human hand jitter and parallax error.
-- **Comprehensive Live Edge Review Screen (DocScanner View)**:
-  - **Live Camera Feed**: Real-time 30 FPS camera feed with the detected display quadrilateral drawn in neon cyan `(0, 245, 255)`, semi-transparent polygon fill, diagonal guidelines, and edge dimension measurements (`Top`, `Bottom`, `Left`, `Right` in camera pixels).
-  - **Color-Coded Corner Pins**: Corner nodes labeled with badges: `TL` (Green), `TR` (Yellow), `BR` (Orange), `BL` (Cyan), and `CENTER` crosshair.
-  - **Diagnostics & Metrics Panel**: Shows sub-pixel camera coordinates for all corners, mapped screen coordinates, edge widths/heights, display aspect ratio, reprojection error, and geometry convexity check (`EXCELLENT` vs `WARNING: SKEWED`).
-- **Interactive Decision Prompts (Accept or Recalibrate)**:
-  - No rushed auto-timeouts! The review stays open so you can inspect the edges and alignment carefully.
-  - **Button 1 / `[ENTER]`**: **Accept & Continue** — Confirms calibration, saves data to disk, and proceeds to Whiteboard mode.
-  - **Button 2 / `[R]`**: **Recalibrate Again** — If calibration didn't happen properly, lighting caused glare, or edges look misaligned, click or press **`[R]`** to immediately restart the calibration routine.
-  - **Button 3 / `[SPACE]`**: **Default Bounds (1:1)** — Standard 1:1 camera boundary fallback (convenient for PC development).
-  - **`[ESC]`**: Abort calibration and exit.
+### Dual Calibration System: Auto DocScanner & Manual Mouse Modes
+The calibration system maps your physical monitor's display boundaries to the camera view with two dedicated modes:
+1. **Auto DocScanner Mode (Page Scanner Algorithm)**:
+   - Uses real computer vision page scanner algorithms (`cv2.Canny`, `cv2.dilate`, `cv2.findContours`, `cv2.approxPolyDP`, and Otsu threshold fallback) to automatically locate the 4-sided polygon of your glowing monitor in the camera feed.
+   - Automatically orders the quad vertices clockwise into `[Top-Left, Top-Right, Bottom-Right, Bottom-Left]`.
+2. **Manual Mouse Mode (Click 4 Corners in Sequence)**:
+   - Click directly on your monitor's 4 physical corners in the live camera feed:
+     1. Top-Left `[TL]`
+     2. Top-Right `[TR]`
+     3. Bottom-Right `[BR]`
+     4. Bottom-Left `[BL]`
+
+### Interactive Calibration Studio with Mouse-Draggable Pins
+Both Auto and Manual modes open into the **Calibration Studio**:
+- **Draggable Corner Pins**: Hover over and drag any corner pin (`TL`, `TR`, `BR`, `BL`) with your mouse in real time to match your monitor's bezel with millimeter precision!
+- **Live Camera Feed**: 30 FPS camera preview with the neon cyan quadrilateral, semi-transparent screen overlay, center crosshair, and edge dimension badges (`Top`, `Bottom`, `Left`, `Right` in pixels).
+- **Telemetry & Convexity Checks**: Live display aspect ratio comparison, edge measurements, sub-pixel camera-to-display mapping, and status validation.
+- **Controls & Action Buttons**:
+  - **`[ENTER]` or Button [Accept & Continue]**: Locks in the calibration matrix, saves to `calibration_data/calibration.json`, and launches the Whiteboard.
+  - **`[A]` or Button [Auto DocScanner Scan]**: Re-scans the camera feed using the DocScanner algorithm.
+  - **`[M]` or Button [Manual Re-Click]**: Clears corners and prompts you to click all 4 corners again in sequence.
+  - **`[SPACE]` or Button [Default Bounds]**: Resets to standard 1:1 camera boundary.
+  - **`[ESC]`**: Aborts calibration.
 
 ### Strict IR Discrimination vs Normal White Light & Blackboard Drawings
 Camera sensors without IR-cut filters perceive near-infrared light (850nm / 940nm) with a distinct **light-purple / violet / magenta signature** (Red & Blue channels are high, Green is substantially lower):
