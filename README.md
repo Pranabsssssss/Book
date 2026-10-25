@@ -80,7 +80,7 @@ When running `main.py` (or `test_camera.py`), you can select which camera to use
     ```
 - **Config setting**: Change `CAMERA_BACKEND = "ribbon"` or `"usb"` in `config.py`.
 
-### Differential Dots Display Calibration on Startup
+### Differential Dots Display Calibration & Live Edge Review
 The calibration maps your monitor's display boundaries to the camera view using automated **Differential Dots Calibration** (DocScanner Quad calculation):
 - **Automated Target Dots on Display Edges**: The monitor displays a full black screen, captures a baseline camera frame, and then flashes white calibration targets one by one at each corner:
   1. Top-Left corner: `(50, 50)`
@@ -90,8 +90,16 @@ The calibration maps your monitor's display boundaries to the camera view using 
   5. Center verification point: `(W/2, H/2)`
 - **Differential Background Subtraction**: Uses `cv2.absdiff(dot_frame, black_baseline)` to cancel out 100% of room lighting, ceiling lamps, and ambient reflections.
 - **Sub-Pixel Centroid Precision**: Calculates exact sub-pixel centroids `(cx, cy)` from the differential moments, eliminating human hand jitter and parallax error.
-- **Live DocScanner Quad Review**: After capturing the points, the screen shows a live camera review with the 4 display edges drawn in green and corner pins labeled `TL`, `TR`, `BR`, and `BL`.
-- **Keyboard Shortcuts**: Press **`[ENTER]`** to confirm calibration and proceed, **`[SPACE]`** to use standard camera bounds bypass (ideal for PC development), or **`[S]`** to skip calibration.
+- **Comprehensive Live Edge Review Screen (DocScanner View)**:
+  - **Live Camera Feed**: Real-time 30 FPS camera feed with the detected display quadrilateral drawn in neon cyan `(0, 245, 255)`, semi-transparent polygon fill, diagonal guidelines, and edge dimension measurements (`Top`, `Bottom`, `Left`, `Right` in camera pixels).
+  - **Color-Coded Corner Pins**: Corner nodes labeled with badges: `TL` (Green), `TR` (Yellow), `BR` (Orange), `BL` (Cyan), and `CENTER` crosshair.
+  - **Diagnostics & Metrics Panel**: Shows sub-pixel camera coordinates for all corners, mapped screen coordinates, edge widths/heights, display aspect ratio, reprojection error, and geometry convexity check (`EXCELLENT` vs `WARNING: SKEWED`).
+- **Interactive Decision Prompts (Accept or Recalibrate)**:
+  - No rushed auto-timeouts! The review stays open so you can inspect the edges and alignment carefully.
+  - **Button 1 / `[ENTER]`**: **Accept & Continue** — Confirms calibration, saves data to disk, and proceeds to Whiteboard mode.
+  - **Button 2 / `[R]`**: **Recalibrate Again** — If calibration didn't happen properly, lighting caused glare, or edges look misaligned, click or press **`[R]`** to immediately restart the calibration routine.
+  - **Button 3 / `[SPACE]`**: **Default Bounds (1:1)** — Standard 1:1 camera boundary fallback (convenient for PC development).
+  - **`[ESC]`**: Abort calibration and exit.
 
 ### Strict IR Discrimination vs Normal White Light & Blackboard Drawings
 Camera sensors without IR-cut filters perceive near-infrared light (850nm / 940nm) with a distinct **light-purple / violet / magenta signature** (Red & Blue channels are high, Green is substantially lower):
