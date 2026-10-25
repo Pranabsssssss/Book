@@ -326,6 +326,8 @@ class Whiteboard:
         aspect_val = self.dev_info.get("aspect_ratio", 0.0)
         in_display = self.dev_info.get("in_display_area", False)
         peak_val = self.dev_info.get("peak_brightness", 0)
+        excess_val = self.dev_info.get("purple_excess", 0.0)
+        is_ir = self.dev_info.get("is_ir_purple", False)
 
         action_str = "LIGHT OFF (PEN LIFTED)"
         if self.current_screen_point:
@@ -338,15 +340,18 @@ class Whiteboard:
             else:
                 action_str = "LIGHT ON (MARKING DOT)"
 
+        ir_status_str = f"AUTHENTIC IR (+{excess_val:.0f} Purple Excess)" if is_ir else "NONE (White Light Filtered)"
+
         tele_lines = [
             f"FPS              : {fps:.1f}",
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
+            f"IR Spectral Type : {ir_status_str}",
+            f"White Board Disc : ACTIVE (Whiteboard drawings rejected)",
             f"Display Bounds   : DocScanner Quad (Active)",
-            f"In Display Area  : {'YES (Valid Drawing Zone)' if in_display else 'NO (Outside Screen Quad)'}",
+            f"In Display Area  : {'YES (Inside Display Quad)' if in_display else 'NO (Outside Screen Quad)'}",
             f"Dot Geometry     : Circ: {circ_val:.2f} | Aspect: {aspect_val:.2f} (Circles Only)",
             f"Camera Point     : {cam_str}",
             f"Screen Point     : {scr_str}",
-            f"Peak Brightness  : {peak_val} / 255",
             f"Marker Action    : {action_str}",
         ]
 

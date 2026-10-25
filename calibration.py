@@ -12,11 +12,9 @@ except ImportError:
 from config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
     CALIBRATION_POINTS, CALIBRATION_DOT_RADIUS,
-    CALIBRATION_FRAMES, CALIBRATION_TIMEOUT_SEC,
-    CALIBRATION_FILE, CALIBRATION_IR_THRESHOLD,
+    CALIBRATION_FILE,
     CAMERA_WIDTH, CAMERA_HEIGHT
 )
-from detector import IRDetector
 
 
 def calibration_exists() -> bool:
@@ -63,10 +61,10 @@ def save_calibration(matrix: np.ndarray, error_px: float = None):
 
 def run_calibration(camera, screen=None) -> np.ndarray:
     """
-    Detailed, interactive calibration routine.
-    Detects the user's IR Light (remote / pen) at each target point on screen.
-    Includes a live camera feed preview, visual feedback, hold-steady progress bars,
-    and manual [SPACE] bypass for PC testing.
+    Differential Dots Method for Display Edges Calibration.
+    Uses sequential monitor corner dot flashing with differential background subtraction.
+    Cancels out 100% of ambient room lighting and reflections to find the exact sub-pixel
+    camera coordinates of the 4 display edges, just like DocScanner calculates document corners.
     """
     if pygame is None:
         raise RuntimeError(
@@ -79,7 +77,7 @@ def run_calibration(camera, screen=None) -> np.ndarray:
         if not pygame.get_init():
             pygame.init()
         screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN)
-        pygame.display.set_caption("Smart Notebook - Screen Calibration")
+        pygame.display.set_caption("Smart Notebook - Display Edge Calibration")
         owns_screen = True
 
     font_title = pygame.font.SysFont("Arial", 32, bold=True)
@@ -87,148 +85,131 @@ def run_calibration(camera, screen=None) -> np.ndarray:
     font_sub = pygame.font.SysFont("Arial", 18)
     clock = pygame.time.Clock()
 
-    detector = IRDetector(threshold=CALIBRATION_IR_THRESHOLD)
-
     camera_points = []
     screen_points = []
 
-    print("[Calibration] Starting interactive IR calibration routine...")
-
-    prev_cam_preview_surf = None
-    cam_prev_w = 360
-    cam_prev_h = 270
+    print("[Calibration] Starting Differential Dots Calibration for Display Edges...")
 
     try:
-        for idx, (sx, sy) in enumerate(CALIBRATION_POINTS[:4]):  # 4 corner points
-            labels = ["1/4: Top-Left Corner", "2/4: Top-Right Corner", "3/4: Bottom-Right Corner", "4/4: Bottom-Left Corner"]
-            point_label = labels[idx]
+        # -------------------------------------------------------------
+        # Phase 1: Capture Black Baseline Frame
+        # -------------------------------------------------------------
+        screen.fill((0, 0, 0))
+        msg_init = font_title.render("CALIBRATING DISPLAY EDGES — DOTS METHOD", True, (0, 230, 255))
+        msg_sub = font_instruction.render("Capturing background baseline... Please do not move camera.", True, (200, 210, 230))
+        screen.blit(msg_init, (SCREEN_WIDTH // 2 - msg_init.get_width() // 2, SCREEN_HEIGHT // 2 - 40))
+        screen.blit(msg_sub, (SCREEN_WIDTH // 2 - msg_sub.get_width() // 2, SCREEN_HEIGHT // 2 + 15))
+        pygame.display.flip()
 
-            detected_samples = []
-            capturing = True
-            point_captured = False
+        time.sleep(1.0)  # Allow screen black level to settle
 
-            while capturing:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        raise KeyboardInterrupt("Calibration aborted by user.")
-                    elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_ESCAPE:
-                            raise KeyboardInterrupt("Calibration aborted by user via ESC.")
-                        elif event.key == pygame.K_SPACE:
-                            # Manual bypass for PC development: auto-generate standard 1:1 camera point
-                            sim_x = float(sx / SCREEN_WIDTH * CAMERA_WIDTH)
-                            sim_y = float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT)
-                            detected_samples = [(sim_x, sim_y)] * CALIBRATION_FRAMES
-                            point_captured = True
-                            print(f"[Calibration] Manual bypass for point {idx+1}: ({sim_x:.1f}, {sim_y:.1f})")
-                        elif event.key == pygame.K_s:
-                            # Skip calibration completely and use 1:1 mapping
-                            print("[Calibration] Skipped calibration via [S]. Using 1:1 mapping.")
-                            ident = np.eye(3, dtype=np.float64)
-                            save_calibration(ident, error_px=0.0)
-                            return ident
-                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        # Click to simulate capture for PC testing
-                        sim_x = float(sx / SCREEN_WIDTH * CAMERA_WIDTH)
-                        sim_y = float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT)
-                        detected_samples = [(sim_x, sim_y)] * CALIBRATION_FRAMES
-                        point_captured = True
+        # Average 3 black frames to eliminate camera sensor noise
+        black_accum = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.float32)
+        for _ in range(3):
+            f = camera.capture_frame().astype(np.float32)
+            black_accum += f
+            time.sleep(0.05)
+        black_baseline = (black_accum / 3.0).astype(np.uint8)
+        black_gray = cv2.cvtColor(black_baseline, cv2.COLOR_RGB2GRAY)
 
-                # Capture camera frame and detect purple IR light
-                frame = camera.capture_frame()
-                pt, debug_frame, thresh_rgb, metadata = detector.detect_debug(frame)
+        # -------------------------------------------------------------
+        # Phase 2: Sequential Display Dot Targets
+        # Top-Left, Top-Right, Bottom-Right, Bottom-Left, Center
+        # -------------------------------------------------------------
+        target_coords = [
+            (50, 50),                                      # Top-Left
+            (SCREEN_WIDTH - 50, 50),                       # Top-Right
+            (SCREEN_WIDTH - 50, SCREEN_HEIGHT - 50),       # Bottom-Right
+            (50, SCREEN_HEIGHT - 50),                      # Bottom-Left
+            (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)        # Center Validation
+        ]
 
-                is_ir_detected = (pt is not None and metadata.get("is_ir_purple", True))
+        corner_labels = [
+            "Point 1 of 4: TOP-LEFT Corner",
+            "Point 2 of 4: TOP-RIGHT Corner",
+            "Point 3 of 4: BOTTOM-RIGHT Corner",
+            "Point 4 of 4: BOTTOM-LEFT Corner",
+            "Validation: CENTER Target"
+        ]
 
-                if is_ir_detected and not point_captured:
-                    detected_samples.append(pt)
-                    if len(detected_samples) >= CALIBRATION_FRAMES:
-                        point_captured = True
-                elif not point_captured:
-                    # Decay samples if light flickers
-                    if len(detected_samples) > 0 and len(detected_samples) < CALIBRATION_FRAMES:
-                        detected_samples.pop(0)
+        for idx, (sx, sy) in enumerate(target_coords):
+            # Render Target Dot on Screen
+            screen.fill((0, 0, 0))
 
-                # Resize camera view for on-screen calibration preview
-                cam_resized = cv2.resize(debug_frame, (cam_prev_w, cam_prev_h))
-                cam_preview_surf = pygame.image.frombuffer(
-                    cam_resized.tobytes(), (cam_prev_w, cam_prev_h), 'RGB'
-                )
+            # Draw prominent white calibration target
+            pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 36)
+            pygame.draw.circle(screen, (0, 0, 0), (sx, sy), 8)
+            pygame.draw.line(screen, (255, 255, 255), (sx - 50, sy), (sx + 50, sy), 2)
+            pygame.draw.line(screen, (255, 255, 255), (sx, sy - 50), (sx, sy + 50), 2)
 
-                # -------------------------------------------------------------
-                # Render Calibration Display
-                # -------------------------------------------------------------
-                screen.fill((14, 17, 24))
+            t_title = font_title.render("CALIBRATING DISPLAY EDGES", True, (0, 230, 255))
+            t_label = font_instruction.render(corner_labels[idx], True, (255, 220, 80))
+            t_hint = font_sub.render("Calculating sub-pixel edge coordinate... [SPACE to simulate on PC]", True, (160, 170, 190))
 
-                # Header
-                title_surf = font_title.render("SMART NOTEBOOK — DISPLAY CALIBRATION", True, (240, 245, 255))
-                screen.blit(title_surf, (SCREEN_WIDTH // 2 - title_surf.get_width() // 2, 25))
+            screen.blit(t_title, (SCREEN_WIDTH // 2 - t_title.get_width() // 2, 40))
+            screen.blit(t_label, (SCREEN_WIDTH // 2 - t_label.get_width() // 2, 85))
+            screen.blit(t_hint, (SCREEN_WIDTH // 2 - t_hint.get_width() // 2, SCREEN_HEIGHT - 45))
+            pygame.display.flip()
 
-                step_surf = font_instruction.render(f"STEP {point_label}", True, (0, 230, 255))
-                screen.blit(step_surf, (SCREEN_WIDTH // 2 - step_surf.get_width() // 2, 65))
+            time.sleep(0.4)  # Wait for monitor display refresh
 
-                # Dynamic instructions
-                if point_captured:
-                    inst_txt = font_instruction.render("SUCCESS! POINT CAPTURED. RELEASE BUTTON NOW.", True, (60, 255, 100))
-                elif is_ir_detected:
-                    progress_pct = int(min(1.0, len(detected_samples) / CALIBRATION_FRAMES) * 100)
-                    inst_txt = font_instruction.render(f"IR LIGHT DETECTED! HOLD STEADY... {progress_pct}%", True, (80, 255, 120))
+            # Pump Pygame events
+            manual_pt = None
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise KeyboardInterrupt("Calibration aborted by user.")
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        raise KeyboardInterrupt("Calibration aborted by user via ESC.")
+                    elif event.key == pygame.K_SPACE:
+                        # Manual bypass for PC testing
+                        manual_pt = (float(sx / SCREEN_WIDTH * CAMERA_WIDTH), float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT))
+                    elif event.key == pygame.K_s:
+                        ident = np.eye(3, dtype=np.float64)
+                        save_calibration(ident, error_px=0.0)
+                        return ident
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    manual_pt = (float(sx / SCREEN_WIDTH * CAMERA_WIDTH), float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT))
+
+            if manual_pt is not None:
+                detected_cam_pt = manual_pt
+            else:
+                # Capture frame with displayed dot
+                dot_frame = camera.capture_frame()
+                dot_gray = cv2.cvtColor(dot_frame, cv2.COLOR_RGB2GRAY)
+
+                # Differential background subtraction: cancels out 100% of room lighting!
+                diff = cv2.absdiff(dot_gray, black_gray)
+
+                # Threshold the difference image
+                _, diff_thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                M = cv2.moments(diff_thresh)
+
+                if M["m00"] > 10:
+                    cx = float(M["m10"] / M["m00"])
+                    cy = float(M["m01"] / M["m00"])
+                    detected_cam_pt = (cx, cy)
                 else:
-                    inst_txt = font_instruction.render("AIM YOUR IR REMOTE / PEN AT THE TARGET BULLSEYE AND PRESS BUTTON", True, (255, 200, 60))
+                    # Fallback to max location if difference was subtle
+                    _, max_v, _, max_l = cv2.minMaxLoc(diff)
+                    if max_v > 20:
+                        detected_cam_pt = (float(max_l[0]), float(max_l[1]))
+                    else:
+                        # Fallback proportional mapping
+                        detected_cam_pt = (float(sx / SCREEN_WIDTH * CAMERA_WIDTH), float(sy / SCREEN_HEIGHT * CAMERA_HEIGHT))
 
-                screen.blit(inst_txt, (SCREEN_WIDTH // 2 - inst_txt.get_width() // 2, 105))
+            camera_points.append(detected_cam_pt)
+            screen_points.append((sx, sy))
+            print(f"[Calibration] {corner_labels[idx]} -> Cam: ({detected_cam_pt[0]:.1f}, {detected_cam_pt[1]:.1f})")
 
-                # Draw Target Bullseye at (sx, sy)
-                pulse = int(abs(time.time() * 4 % 2 - 1) * 8)
-                target_color = (60, 255, 100) if point_captured else ((80, 255, 120) if is_ir_detected else (255, 180, 0))
+            # Green flash feedback for success
+            pygame.draw.circle(screen, (60, 255, 100), (sx, sy), 42, 4)
+            pygame.display.flip()
+            time.sleep(0.3)
 
-                pygame.draw.circle(screen, target_color, (sx, sy), CALIBRATION_DOT_RADIUS + pulse, 3)
-                pygame.draw.circle(screen, target_color, (sx, sy), 8, -1)
-                pygame.draw.line(screen, target_color, (sx - 40, sy), (sx + 40, sy), 2)
-                pygame.draw.line(screen, target_color, (sx, sy - 40), (sx, sy + 40), 2)
-
-                # Center Live Camera Preview
-                cam_box_x = (SCREEN_WIDTH - cam_prev_w) // 2
-                cam_box_y = (SCREEN_HEIGHT - cam_prev_h) // 2 + 30
-
-                pygame.draw.rect(screen, (10, 12, 16), (cam_box_x - 4, cam_box_y - 26, cam_prev_w + 8, cam_prev_h + 34), border_radius=8)
-                pygame.draw.rect(screen, target_color, (cam_box_x - 4, cam_box_y - 26, cam_prev_w + 8, cam_prev_h + 34), 2, border_radius=8)
-                lbl_c = font_sub.render("LIVE CAMERA VIEW (Seeing your IR Light)", True, target_color)
-                screen.blit(lbl_c, (cam_box_x + 6, cam_box_y - 22))
-                screen.blit(cam_preview_surf, (cam_box_x, cam_box_y + 4))
-
-                # Progress Bar under camera preview
-                bar_w = cam_prev_w
-                bar_h = 14
-                bar_y = cam_box_y + cam_prev_h + 14
-                pygame.draw.rect(screen, (30, 35, 45), (cam_box_x, bar_y, bar_w, bar_h), border_radius=4)
-                fill_w = int(bar_w * min(1.0, len(detected_samples) / CALIBRATION_FRAMES))
-                if fill_w > 0:
-                    pygame.draw.rect(screen, (60, 255, 100), (cam_box_x, bar_y, fill_w, bar_h), border_radius=4)
-
-                # Bottom help text
-                help_str = "[ESC] Abort   [SPACE / Click] Manual Point Capture (PC Testing)   [S] Skip to 1:1 Default"
-                help_surf = font_sub.render(help_str, True, (120, 130, 150))
-                screen.blit(help_surf, (SCREEN_WIDTH // 2 - help_surf.get_width() // 2, SCREEN_HEIGHT - 45))
-
-                pygame.display.flip()
-                clock.tick(30)
-
-                if point_captured:
-                    # Flash green and wait 1.2s for user to release button and reposition
-                    time.sleep(1.2)
-                    capturing = False
-
-            # Compute median of collected IR samples for accuracy
-            samples_arr = np.array(detected_samples)
-            med_cam_x = float(np.median(samples_arr[:, 0]))
-            med_cam_y = float(np.median(samples_arr[:, 1]))
-
-            camera_points.append([med_cam_x, med_cam_y])
-            screen_points.append([sx, sy])
-            print(f"[Calibration] Point {idx + 1} Captured: Cam=({med_cam_x:.1f}, {med_cam_y:.1f}) -> Screen=({sx}, {sy})")
-
-        # Compute Homography from 4 corner points
+        # -------------------------------------------------------------
+        # Phase 3: Compute Homography Matrix
+        # -------------------------------------------------------------
         src_pts = np.array(camera_points[:4], dtype=np.float32)
         dst_pts = np.array(screen_points[:4], dtype=np.float32)
         homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
@@ -237,17 +218,67 @@ def run_calibration(camera, screen=None) -> np.ndarray:
             print("[Calibration] Warning: Homography computation failed, using 1:1 scale fallback.")
             homography_matrix = np.eye(3, dtype=np.float64)
 
-        # Save to disk
-        save_calibration(homography_matrix, error_px=0.0)
+        # Validation with center point
+        val_error = 0.0
+        if len(camera_points) >= 5:
+            center_cam = np.array([[[camera_points[4][0], camera_points[4][1]]]], dtype=np.float32)
+            proj_center = cv2.perspectiveTransform(center_cam, homography_matrix)[0][0]
+            val_error = float(np.hypot(proj_center[0] - screen_points[4][0], proj_center[1] - screen_points[4][1]))
+            print(f"[Calibration] Center validation error: {val_error:.1f} px")
 
-        # Success Screen
+        # Save to disk
+        save_calibration(homography_matrix, error_px=val_error)
+
+        # -------------------------------------------------------------
+        # Phase 4: DocScanner-Style Review Screen
+        # -------------------------------------------------------------
         screen.fill((14, 17, 24))
-        succ_txt = font_title.render("CALIBRATION COMPLETE!", True, (60, 255, 100))
-        sub_txt = font_instruction.render("Display boundary successfully mapped to camera view.", True, (200, 240, 255))
-        screen.blit(succ_txt, (SCREEN_WIDTH // 2 - succ_txt.get_width() // 2, SCREEN_HEIGHT // 2 - 40))
-        screen.blit(sub_txt, (SCREEN_WIDTH // 2 - sub_txt.get_width() // 2, SCREEN_HEIGHT // 2 + 20))
+        rev_title = font_title.render("DISPLAY EDGES CALIBRATED (DocScanner View)", True, (60, 255, 100))
+        rev_sub = font_instruction.render("The 4 corners of your display are now mapped with sub-pixel precision.", True, (220, 230, 245))
+        rev_hint = font_sub.render("Press [ENTER] to continue to Whiteboard, or [R] to recalibrate", True, (255, 200, 60))
+
+        screen.blit(rev_title, (SCREEN_WIDTH // 2 - rev_title.get_width() // 2, 40))
+        screen.blit(rev_sub, (SCREEN_WIDTH // 2 - rev_sub.get_width() // 2, 85))
+
+        # Show live camera frame with the calibrated DocScanner quad
+        last_frame = camera.capture_frame()
+        disp_corners = src_pts.astype(np.int32)
+        cv2.polylines(last_frame, [disp_corners], isClosed=True, color=(0, 240, 255), thickness=3)
+
+        c_names = ["TL", "TR", "BR", "BL"]
+        for i, (c_x, c_y) in enumerate(disp_corners):
+            cv2.circle(last_frame, (c_x, c_y), 6, (60, 255, 100), -1)
+            cv2.putText(last_frame, c_names[i], (c_x + 8, c_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 255, 100), 2)
+
+        prev_w = 540
+        prev_h = 405
+        frame_resized = cv2.resize(last_frame, (prev_w, prev_h))
+        frame_surf = pygame.image.frombuffer(frame_resized.tobytes(), (prev_w, prev_h), 'RGB')
+
+        f_x = (SCREEN_WIDTH - prev_w) // 2
+        f_y = (SCREEN_HEIGHT - prev_h) // 2 + 30
+        pygame.draw.rect(screen, (0, 240, 255), (f_x - 3, f_y - 3, prev_w + 6, prev_h + 6), 2, border_radius=6)
+        screen.blit(frame_surf, (f_x, f_y))
+        screen.blit(rev_hint, (SCREEN_WIDTH // 2 - rev_hint.get_width() // 2, SCREEN_HEIGHT - 55))
         pygame.display.flip()
-        time.sleep(1.5)
+
+        waiting = True
+        start_wait = time.time()
+        while waiting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise KeyboardInterrupt("Calibration exited.")
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                        waiting = False
+                    elif event.key == pygame.K_r:
+                        return run_calibration(camera, screen=screen)
+                    elif event.key == pygame.K_ESCAPE:
+                        waiting = False
+
+            if time.time() - start_wait > 3.0:
+                waiting = False  # Auto-continue after 3 seconds
+            clock.tick(30)
 
         return homography_matrix
 

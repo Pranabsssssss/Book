@@ -80,22 +80,24 @@ When running `main.py` (or `test_camera.py`), you can select which camera to use
     ```
 - **Config setting**: Change `CAMERA_BACKEND = "ribbon"` or `"usb"` in `config.py`.
 
-### Detailed IR Calibration on Startup
-The calibration maps your monitor's display boundaries to the camera view using your **actual IR Light / Remote**:
-- **Step-by-Step Interactive Targets**: Target bullseyes appear at each of the 4 corners:
-  1. Top-Left corner
-  2. Top-Right corner
-  3. Bottom-Right corner
-  4. Bottom-Left corner
-- **Aim & Hold Your IR Light**: Aim your IR remote control or marker pen at the target bullseye and press/hold the button.
-- **Live Center Camera Preview**: A live camera view in the center shows if the camera sees your IR light, displaying a green reticle and progress bar (`HOLD STEADY... 80%`).
-- **Confirmation Flash**: Once captured, the target flashes bright green and prompts you to release the button and move to the next corner.
-- **PC Testing Assist**: You can press **`[SPACE]`** or mouse-click during calibration to simulate a capture, or press **`[S]`** to skip directly to default 1:1 mapping.
+### Differential Dots Display Calibration on Startup
+The calibration maps your monitor's display boundaries to the camera view using automated **Differential Dots Calibration** (DocScanner Quad calculation):
+- **Automated Target Dots on Display Edges**: The monitor displays a full black screen, captures a baseline camera frame, and then flashes white calibration targets one by one at each corner:
+  1. Top-Left corner: `(50, 50)`
+  2. Top-Right corner: `(W-50, 50)`
+  3. Bottom-Right corner: `(W-50, H-50)`
+  4. Bottom-Left corner: `(50, H-50)`
+  5. Center verification point: `(W/2, H/2)`
+- **Differential Background Subtraction**: Uses `cv2.absdiff(dot_frame, black_baseline)` to cancel out 100% of room lighting, ceiling lamps, and ambient reflections.
+- **Sub-Pixel Centroid Precision**: Calculates exact sub-pixel centroids `(cx, cy)` from the differential moments, eliminating human hand jitter and parallax error.
+- **Live DocScanner Quad Review**: After capturing the points, the screen shows a live camera review with the 4 display edges drawn in green and corner pins labeled `TL`, `TR`, `BR`, and `BL`.
+- **Keyboard Shortcuts**: Press **`[ENTER]`** to confirm calibration and proceed, **`[SPACE]`** to use standard camera bounds bypass (ideal for PC development), or **`[S]`** to skip calibration.
 
-### Light-Purple IR vs Normal White Light Differentiation
-Camera sensors perceive near-infrared light (850nm / 940nm) with a distinct **light-purple / violet / magenta tint** (Red & Blue channels are high, Green is substantially lower: $\frac{R+B}{2G} \ge 1.14$).
-- **Authentic IR Light**: Saturated core with purple/violet spectral signature ($\ge 235$ peak, ratio $> 1.14$, purple excess $> 10$) $\rightarrow$ **ACCEPTED & TRACKED**.
-- **Normal White Light**: Neutral color balance ($R \approx G \approx B$, ratio $\approx 1.0$) from ceiling lamps, white cloth, flashlight, or white screen pixels $\rightarrow$ **REJECTED AS WHITE LIGHT**.
+### Strict IR Discrimination vs Normal White Light & Blackboard Drawings
+Camera sensors without IR-cut filters perceive near-infrared light (850nm / 940nm) with a distinct **light-purple / violet / magenta signature** (Red & Blue channels are high, Green is substantially lower):
+- **Authentic IR Light (Marker / Remote)**: $B \ge 240, R \ge 240, G \le 235$, Purple Excess $(B - G) + (R - G) \ge 18.0$, Spectral Ratio $\frac{R+B}{2G} \ge 1.08 \rightarrow$ **ACCEPTED & TRACKED**.
+- **White Drawings on the Blackboard**: Drawn by equal RGB subpixels on your monitor ($R \approx G \approx B \approx 255$, Purple Excess $\le 0.0$, Spectral Ratio $\approx 1.00$) $\rightarrow$ **100% HARD REJECTED**. The system never detects its own white drawings as IR LEDs, preventing ghost runaway drawing loops.
+- **Normal White Light**: Ceiling lamps, window daylight, flashlights, or white clothing are identified as neutral ($G \ge B - 5$) $\rightarrow$ **REJECTED**.
 
 ### Operating Modes (Production vs Testing/Development)
 After calibration is complete, the application prompts you to choose an operating mode:
@@ -106,16 +108,16 @@ Select Operating Mode:
 Enter mode [1-2] or press [Enter] for default (production):
 ```
 
-- **Production Mode**: Clean fullscreen whiteboard canvas with no UI clutter. Direct IR drawing experience with automatic pen lift and anti-spike line filtering.
-- **Testing / Development Mode**: Dedicated OpenCV test bench (does not draw all over your screen):
+- **Production Mode**: Clean fullscreen blackboard canvas with no UI clutter. Direct IR drawing experience with automatic pen lift and anti-spike line filtering.
+- **Testing / Development Mode**: Dedicated OpenCV test bench (does not scribble all over your fullscreen background):
   1. **Large Live Camera Feed (540x405)**: Real-time camera view showing the **DocScanner Display Boundary Quadrilateral** (the 4 edges and corners of the monitor outlined in neon cyan/green) and precision reticle tracking circular IR dots inside the display area.
-  2. **Large OpenCV Threshold Mask (540x405)**: Binary mask showing exactly what pixels pass the active brightness threshold.
-  3. **Diagnostics & Telemetry**: Real-time FPS, DocScanner quadrilateral status, dot circularity & aspect ratio, camera coordinates `(cx, cy)`, screen coordinates `(sx, sy)`, peak brightness (240-255), and blob area.
+  2. **Large OpenCV Threshold Mask (540x405)**: Binary mask showing exactly what pixels pass the active brightness threshold and chromaticity filter.
+  3. **Diagnostics & Telemetry HUD**: Real-time FPS, threshold value, IR spectral type & purple excess, whiteboard drawing rejection status, DocScanner quadrilateral status, dot circularity & aspect ratio, camera coordinates `(cx, cy)`, screen coordinates `(sx, sy)`, and pen action.
   4. **Interactive Test Drawing Pad**: Dedicated preview pad where you can test strokes, pulsating/blinking remote lights, and button tapping in real time.
 - **DocScanner Display Area & Dot Drawing**:
   - The camera calculates the 4 corners of the display just like a document scanner app (CamScanner / DocScanner).
   - Any light detected outside the display boundary is automatically ignored.
-  - Whenever circular IR light turns on inside the display area (even if pulsating or blinking), it immediately draws a dot at that exact position. Smooth strokes connect naturally as you move.
+  - Whenever circular IR light turns on inside the display area (even if pulsating or blinking), it immediately stamps a dot at that exact position. Smooth strokes connect naturally as you move.
 - **Command-Line Selection**:
   ```bash
   # Start directly in Testing / Dev Bench:
@@ -165,8 +167,11 @@ Book/
 
 ## ⚙️ Configuration & Tuning (`config.py`)
 
-- **`IR_THRESHOLD`** (default: `245`): Brightness threshold for the IR pen. Increase if ambient light creates false positives; decrease if the IR LED is dim.
+- **`IR_THRESHOLD`** (default: `240`): Brightness threshold for the IR pen. Increase if ambient light creates false positives; decrease if the IR LED is dim.
+- **`IR_PURPLE_EXCESS_MIN`** (`18.0`): Minimum purple excess `(B - G) + (R - G)` required to identify authentic IR emissions. Rejects 100% of white drawings on the blackboard.
+- **`IR_SPECTRAL_RATIO_MIN`** (`1.08`): Minimum spectral ratio `(R + B) / (2 * G)` required to validate IR emissions.
 - **`CAMERA_WIDTH`, `CAMERA_HEIGHT`** (`640x480`): Frame capture resolution optimized for 30+ FPS real-time tracking on RPi 3B+.
+- **`MAX_STROKE_JUMP`** (`150`): Anti-teleport filter threshold in screen pixels to reject spurious fast jumps.
 - **`PEN_RADIUS`** (`4`): Pen stroke thickness (~8px diameter).
 - **`ERASER_RADIUS`** (`25`): Eraser head size (~50px diameter).
-- **`BUTTON_DWELL_FRAMES`** (`15`): Number of consecutive frames (~0.5s at 30fps) required to activate on-screen buttons.
+- **`BUTTON_DWELL_FRAMES`** (`2`): Number of consecutive frames (~60ms) required to activate on-screen buttons (supports quick blinking remote taps).

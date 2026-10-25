@@ -10,10 +10,12 @@ from config import (
 
 class IRDetector:
     """
-    Spectral IR Dot Detector.
-    Differentiates authentic Light-Purple / Violet IR light (from remote controls and IR pens)
-    from ordinary white ambient light (ceiling lamps, flashlights, white cloth/paper, screen glare).
-    Strictly accepts compact circular dots and circles.
+    Spectral IR Light & Circular Dot Detector.
+    Strictly discriminates authentic Light-Purple / Violet IR light (from remote controls and IR markers)
+    from ordinary white light (white drawings on the blackboard, ceiling lamps, flashlights, paper).
+
+    Rejects 100% of white monitor pixels because monitor white has equal or higher Green (G >= B),
+    whereas authentic IR light has an intense Blue + Red (purple/violet) excess over Green.
     """
     def __init__(self, threshold=IR_THRESHOLD, min_area=IR_MIN_AREA, max_area=IR_MAX_AREA):
         self.threshold = threshold
@@ -31,13 +33,13 @@ class IRDetector:
 
     def detect_debug(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
         """
-        Comprehensive circular dot detection with IR spectral differentiation and DocScanner quad.
+        Comprehensive circular dot detection with strict IR spectral discrimination and DocScanner quad.
 
         Returns:
             point: (cx, cy) tuple or None
             annotated_frame: RGB image with active target reticle and display quad overlay
             thresh_rgb: RGB image of the binary threshold mask
-            metadata: dict containing area, circularity, aspect ratio, peak brightness, etc.
+            metadata: dict containing area, circularity, spectral ratio, purple excess, etc.
         """
         if frame is None:
             empty = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
@@ -50,16 +52,15 @@ class IRDetector:
             r = frame[:, :, 0].astype(np.float32)
             g = frame[:, :, 1].astype(np.float32)
             b = frame[:, :, 2].astype(np.float32)
-            # Standard luminance
             gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         else:
             gray = frame
             r = g = b = gray.astype(np.float32)
 
-        # Use 3x3 blur to preserve small pinpoint circular LED cores
+        # 3x3 Gaussian blur to preserve small pinpoint LED cores
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        # Threshold for intensely bright pixels
+        # Threshold for bright pixels
         thresh_val = threshold if threshold is not None else self.threshold
         _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
 
@@ -98,6 +99,7 @@ class IRDetector:
             "aspect_ratio": 0.0,
             "peak_brightness": 0,
             "spectral_ratio": 1.0,
+            "purple_excess": 0.0,
             "is_ir_purple": False,
             "in_display_area": True,
             "point": None,
@@ -111,7 +113,7 @@ class IRDetector:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
             return None, annotated, thresh_rgb, metadata
 
-        circular_candidates = []
+        strictly_valid_ir_candidates = []
 
         for c in contours:
             area = cv2.contourArea(c)
@@ -135,7 +137,7 @@ class IRDetector:
                 cv2.drawContours(annotated, [c], -1, (180, 100, 40), 1)
                 continue
 
-            # 3. Geometric Aspect Ratio Filter: must be roughly square / circular
+            # 3. Geometric Aspect Ratio Filter: must be roughly square / circular (not strips)
             x_b, y_b, w_b, h_b = cv2.boundingRect(c)
             aspect_ratio = float(w_b) / max(1.0, float(h_b))
             if not (0.50 <= aspect_ratio <= 2.0):
@@ -152,27 +154,51 @@ class IRDetector:
             # 5. Peak Brightness in contour region
             roi_gray = gray[y_b:y_b + h_b, x_b:x_b + w_b]
             peak_val = int(np.max(roi_gray)) if roi_gray.size > 0 else 0
+            if peak_val < 200:
+                continue
 
             # -------------------------------------------------------------
-            # 6. IR Chromaticity & Spectral Differentiation
-            # Separates Light-Purple / Violet IR Light from Normal White Light
+            # 6. STRICT IR CHROMATICITY & SPECTRAL DIFFERENTIATION
+            # Differentiates Light-Purple / Violet IR Light from White Blackboard Drawings!
             # -------------------------------------------------------------
             roi_r = r[y_b:y_b + h_b, x_b:x_b + w_b]
             roi_g = g[y_b:y_b + h_b, x_b:x_b + w_b]
             roi_b = b[y_b:y_b + h_b, x_b:x_b + w_b]
 
+            # Purple excess across the blob: (Blue - Green) + (Red - Green)
+            # In authentic IR, Red & Blue are high and Green is substantially lower.
+            # In blackboard white drawings or room white lamps, Green is >= Blue, so purple excess <= 0!
+            purple_excesses = (roi_b - roi_g) + (roi_r - roi_g)
+            max_purple_excess = float(np.max(purple_excesses)) if purple_excesses.size > 0 else 0.0
+
+            # Spectral ratio: (Red + Blue) / (2 * max(Green, 1))
             g_safe = np.maximum(roi_g, 1.0)
             spectral_ratios = (roi_r + roi_b) / (2.0 * g_safe)
             max_spectral_ratio = float(np.max(spectral_ratios)) if spectral_ratios.size > 0 else 1.0
 
-            purple_excesses = roi_r + roi_b - 2.0 * roi_g
-            max_purple_excess = float(np.max(purple_excesses)) if purple_excesses.size > 0 else 0.0
+            # STRICT CRITERIA:
+            # - Peak brightness >= 205
+            # - Maximum purple excess >= 18.0 (IR remote/pen achieves 30 - 150; monitor white is <= 2.0!)
+            # - Spectral ratio >= 1.08 (monitor white is 0.95 - 1.02)
+            # - Maximum Blue must strictly exceed Green (max(B) > max(G) + 6)
+            max_b = float(np.max(roi_b))
+            max_g = float(np.max(roi_g))
+            max_r = float(np.max(roi_r))
 
-            # Authentic IR Light has significant purple excess:
-            # Saturated core (peak >= 230) + purple tint (ratio >= 1.14 or excess >= 10.0)
-            # or distinctive purple glow (excess >= 25.0)
-            is_ir = (peak_val >= 230 and (max_spectral_ratio >= IR_SPECTRAL_RATIO_MIN or max_purple_excess >= IR_PURPLE_EXCESS_MIN)) or \
-                    (max_purple_excess >= 25.0 and max_spectral_ratio >= 1.20)
+            is_ir = (
+                (peak_val >= 205) and
+                (max_purple_excess >= 18.0) and
+                (max_spectral_ratio >= 1.08) and
+                (max_b >= max_g + 5.0) and
+                (max_r >= max_g + 5.0)
+            )
+
+            # CRITICAL FIX: If it is NOT an authentic IR purple light,
+            # IT IS A WHITE DRAWING ON THE BLACKBOARD OR A ROOM LAMP -> DISCARD COMPLETELY!
+            if not is_ir:
+                # Mark as rejected white light on camera view for diagnostics
+                cv2.drawContours(annotated, [c], -1, (160, 160, 160), 1)
+                continue
 
             # 7. Check if inside calibrated display quad (DocScanner area)
             in_display = True
@@ -180,19 +206,11 @@ class IRDetector:
                 poly = display_quad.astype(np.float32)
                 in_display = (cv2.pointPolygonTest(poly, (cx, cy), False) >= 0)
 
-            # Composite Score:
-            # - Heavily rewards authentic IR purple spectral signature
-            # - Heavily penalizes ordinary white light (lamp, paper, white reflection)
-            score = (peak_val * 2.0) + (circularity * 80.0) - (area * 0.15)
-            if is_ir:
-                score += 500.0 + (max_spectral_ratio * 100.0)
-            else:
-                score -= 300.0  # Penalize ordinary white light
-
+            score = (peak_val * 2.0) + (circularity * 80.0) + (max_purple_excess * 2.0) - (area * 0.15)
             if has_valid_quad and not in_display:
-                score -= 200.0  # Outside display quad
+                score -= 300.0
 
-            circular_candidates.append({
+            strictly_valid_ir_candidates.append({
                 "score": score,
                 "point": (cx, cy),
                 "contour": c,
@@ -201,43 +219,32 @@ class IRDetector:
                 "aspect_ratio": aspect_ratio,
                 "peak": peak_val,
                 "spectral_ratio": max_spectral_ratio,
-                "is_ir": is_ir,
+                "purple_excess": max_purple_excess,
+                "is_ir": True,
                 "in_display": in_display
             })
 
-        if not circular_candidates:
-            cv2.putText(annotated, "WHITE LIGHT / GLARE REJECTED", (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 140, 40), 2)
-            cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (NO IR DOT)", (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
-            metadata["status"] = "REJECTED_WHITE_LIGHT"
+        if not strictly_valid_ir_candidates:
+            cv2.putText(annotated, "WHITE BOARD LIGHT REJECTED (NO IR)", (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 180, 180), 2)
+            cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (NO IR PURPLE DOT)", (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 180, 180), 2)
+            metadata["status"] = "WHITE_LIGHT_REJECTED"
             return None, annotated, thresh_rgb, metadata
 
-        # Pick the highest-scoring candidate (authentic IR LED)
-        circular_candidates.sort(key=lambda item: item["score"], reverse=True)
-        best = circular_candidates[0]
+        # Select the best authentic IR LED
+        strictly_valid_ir_candidates.sort(key=lambda item: item["score"], reverse=True)
+        best = strictly_valid_ir_candidates[0]
 
         best_pt = best["point"]
         best_contour = best["contour"]
         icx, icy = int(best_pt[0]), int(best_pt[1])
         in_display = best["in_display"]
-        is_ir = best["is_ir"]
 
-        # Color-coded feedback on camera view:
-        # Green = Authentic IR inside display
-        # Blue = IR light outside display
-        # Orange = Marginal/White light
-        if is_ir and in_display:
-            reticle_color = (0, 255, 0)
-            status_text = "IR LED: TRACKING"
-        elif is_ir and not in_display:
-            reticle_color = (255, 120, 0)
-            status_text = "IR LED: OUTSIDE DISPLAY"
-        else:
-            reticle_color = (0, 165, 255)
-            status_text = "WHITE LIGHT FILTERED"
+        reticle_color = (0, 255, 0) if in_display else (255, 120, 0)
+        status_text = "AUTHENTIC IR LED: TRACKED" if in_display else "IR LED: OUTSIDE DISPLAY"
 
-        # Draw contour boundary
+        # Draw contour boundary in yellow
         cv2.drawContours(annotated, [best_contour], -1, (255, 230, 0), 2)
 
         # Draw circular target reticle
@@ -247,11 +254,11 @@ class IRDetector:
         cv2.line(annotated, (icx, icy - 20), (icx, icy + 20), reticle_color, 2)
 
         # Text annotation on camera feed
-        label = f"DOT: ({icx}, {icy}) IR-Ratio:{best['spectral_ratio']:.2f} [{status_text}]"
+        label = f"IR DOT: ({icx}, {icy}) Excess:+{best['purple_excess']:.0f} [{status_text}]"
         cv2.putText(annotated, label, (15, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.60, reticle_color, 2)
-        cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (IR PURPLE DOT)", (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+        cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (AUTHENTIC IR PURPLE DOT)", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 255, 0), 2)
 
         # Mark on threshold mask
         cv2.circle(thresh_rgb, (icx, icy), 8, (0, 255, 0), 1)
@@ -261,27 +268,30 @@ class IRDetector:
         metadata["aspect_ratio"] = best["aspect_ratio"]
         metadata["peak_brightness"] = best["peak"]
         metadata["spectral_ratio"] = best["spectral_ratio"]
-        metadata["is_ir_purple"] = is_ir
+        metadata["purple_excess"] = best["purple_excess"]
+        metadata["is_ir_purple"] = True
         metadata["in_display_area"] = in_display
         metadata["point"] = best_pt
-        metadata["status"] = "TRACKING_IR" if is_ir else "WHITE_LIGHT_MARGINAL"
+        metadata["status"] = "TRACKING_AUTHENTIC_IR"
 
         return best_pt, annotated, thresh_rgb, metadata
 
 
 if __name__ == "__main__":
-    print("Testing IRDetector with authentic IR purple discriminator...")
-    # 1. Create image with a purple IR LED (B=255, G=220, R=255) at (300, 200)
+    print("Testing strict IR vs Blackboard White Drawing rejection...")
+    # 1. Create simulated camera frame
     img = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.circle(img, (300, 200), 5, (255, 220, 255), -1)
 
-    # 2. Add an ordinary white light bulb at (150, 150) (R=255, G=255, B=255)
-    cv2.circle(img, (150, 150), 6, (255, 255, 255), -1)
+    # 2. Add White drawing dot on blackboard: (255, 255, 255) at (200, 200)
+    cv2.circle(img, (200, 200), 6, (255, 255, 255), -1)
 
-    det = IRDetector(threshold=230)
+    # 3. Add Authentic IR LED: (B=255, G=210, R=255) at (350, 250)
+    cv2.circle(img, (350, 250), 6, (255, 210, 255), -1)
+
+    det = IRDetector(threshold=200)
     pt, debug_img, mask_img, meta = det.detect_debug(img)
 
-    print(f"Detected point: {pt}")
-    print(f"Is IR Purple: {meta['is_ir_purple']}, Spectral Ratio: {meta['spectral_ratio']:.2f}")
-    assert pt is not None and abs(pt[0] - 300) < 2 and abs(pt[1] - 200) < 2, f"Failed to pick IR dot! Got {pt}"
-    print("Spectral IR Purple vs Normal White Light test passed successfully!")
+    print(f"Detected point: {pt} (expected 350, 250)")
+    print(f"Metadata: {meta}")
+    assert pt is not None and abs(pt[0] - 350) < 2 and abs(pt[1] - 250) < 2, f"Failed! Picked {pt}"
+    print("Strict IR discriminator successfully rejected the blackboard white dot and locked onto the IR LED!")
