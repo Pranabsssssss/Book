@@ -112,13 +112,12 @@ PEN_COLOR = (255, 255, 255)    # Pure white
 PEN_RADIUS = 4                 # ~8px diameter (medium stroke)
 ERASER_RADIUS = 25             # ~50px diameter eraser
 
-# Pen lift timeout in seconds (grace period to prevent stroke breakage on brief dropped frames)
-PEN_LIFT_TIMEOUT = 0.10
+# Pen lift timeout in seconds (grace period to prevent stroke breakage on fast movement or brief dropped frames)
+PEN_LIFT_TIMEOUT = 0.16
 
 # Anti-spike / Anti-jump threshold in screen pixels.
-# If distance between consecutive points > MAX_STROKE_JUMP in 1/30s, do not connect with a line.
-# Prevents spiderweb lines when pen moves while off, or on brief lighting shifts.
-MAX_STROKE_JUMP = 150
+# Increased to 280px to allow fast hand sweeps and writing to connect seamlessly as smooth solid lines.
+MAX_STROKE_JUMP = 280
 
 # === Calibration Configuration (Dynamically measured for current display) ===
 CALIBRATION_POINTS = get_calibration_points(SCREEN_WIDTH, SCREEN_HEIGHT)

@@ -178,13 +178,12 @@ class Whiteboard:
         # ALWAYS draw a solid circle dot at the exact location where light turned on / blinks
         pygame.draw.circle(self.canvas, color, pt, radius)
 
-        # Smooth connection: only connect if hand is smoothly drawing (< 35px between frames)
-        # If pen blinks or jumps across the board, do not draw a connecting line!
+        # Smooth continuous line connection: interpolate between points up to MAX_STROKE_JUMP
         if self.prev_point is not None:
             dx = pt[0] - self.prev_point[0]
             dy = pt[1] - self.prev_point[1]
             dist = (dx * dx + dy * dy) ** 0.5
-            if dist <= 35:
+            if dist <= MAX_STROKE_JUMP:
                 self._draw_interpolated_stroke(self.canvas, color, self.prev_point, pt, radius)
             else:
                 self.prev_point = None
@@ -210,7 +209,8 @@ class Whiteboard:
             dx = pad_pt[0] - self.dev_prev_point[0]
             dy = pad_pt[1] - self.dev_prev_point[1]
             dist = (dx * dx + dy * dy) ** 0.5
-            if dist <= 20:
+            pad_max_jump = int(MAX_STROKE_JUMP * (self.dev_test_pad_w / self.width))
+            if dist <= max(60, pad_max_jump):
                 self._draw_interpolated_stroke(self.dev_test_pad, color, self.dev_prev_point, pad_pt, pad_radius)
             else:
                 self.dev_prev_point = None
@@ -509,10 +509,15 @@ class Whiteboard:
         x1, y1 = p1
         x2, y2 = p2
         dist = int(max(abs(x2 - x1), abs(y2 - y1), 1))
-        for step in range(dist + 1):
+        # Draw hardware-accelerated connecting line for zero-gap speed
+        pygame.draw.line(surface, color, p1, p2, radius * 2)
+        # Stamp round caps along path for perfectly smooth rounded edges
+        step_sz = max(1, radius)
+        for step in range(0, dist + 1, step_sz):
             cx = int(x1 + (x2 - x1) * step / dist)
             cy = int(y1 + (y2 - y1) * step / dist)
             pygame.draw.circle(surface, color, (cx, cy), radius)
+        pygame.draw.circle(surface, color, (x2, y2), radius)
 
     @staticmethod
     def _point_in_rect(point, rect):
