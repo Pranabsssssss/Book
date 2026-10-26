@@ -147,9 +147,38 @@ The detector operates a **two-stage detection architecture** built directly from
 - **Whiteboard Drawing Logic**: The canvas **ONLY marks/draws when the 5mm IR LED bulb is confirmed actively emitting purple IR light**. Releasing the marker button immediately lifts the pen.
 
 #### Dataset & Retraining Tools
+- `tools/capture_dataset.py` (or `python main.py --capture`): Interactive 1000-image camera dataset recorder to capture images directly from your webcam/IR camera for training!
 - `tools/download_dataset.py`: Automatically downloads and prepares images from Wikimedia Commons and augments reference samples.
 - `tools/train_ir_detector.py`: Extracts 12-D feature vectors and trains the classifier, exporting to `models/ir_led_model.json`.
 - `tools/test_two_stage_full.py`: Runs end-to-end verification against reference emitting IR LEDs, unlit stylus bulbs, and white board strokes.
+
+### 📸 Capturing 1000 Images from Your Camera for Custom Model Training
+To train the model on your exact camera sensor, lens, and physical 5mm IR stylus:
+```bash
+# Launch the 1000-image recorder (PC):
+py main.py --capture
+
+# Or on Raspberry Pi:
+python3 main.py --capture
+```
+
+#### How to Record Your 1000 Frames:
+1. **Category `[1]` — IR LED Emitting (Bulb On / Purple Glow)**:
+   - Press **`1`** on your keyboard.
+   - Hold your IR stylus with the push button pressed (emitting that purple light).
+   - **Hold `[SPACE]`** (or press **`A`** for auto-capture) and wave the marker around at different distances, angles, and speeds. (Aim for ~400–500 images).
+2. **Category `[2]` — Unlit 5mm Stylus Bulb (Bulb Off / Idle)**:
+   - Press **`2`** on your keyboard.
+   - Hold your IR stylus unlit (button released).
+   - **Hold `[SPACE]`** and move the stylus tip in front of the camera across different angles and backgrounds. (Aim for ~300 images).
+3. **Category `[3]` — Background & White Light**:
+   - Press **`3`** on your keyboard.
+   - Aim the camera at your screen displaying white drawings, room lamps, daylight, keyboard, or hands.
+   - **Hold `[SPACE]`** to capture ~200 negative samples.
+4. **Instant Training**:
+   - When finished or when 1000 images are reached, press **`Q`** or **`ESC`**.
+   - The tool will automatically ask: `Train model now? [Y/n]`.
+   - Press **`Enter`**, and the model will immediately train on your exact 1000 camera images and update `models/ir_led_model.json`!
 
 ### Operating Modes (Production vs Testing/Development)
 After calibration is complete, the application prompts you to choose an operating mode:

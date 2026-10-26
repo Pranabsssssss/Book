@@ -1,7 +1,7 @@
 {
   "model_name": "IR_LED_Bulb_Classifier",
   "version": "1.0.0",
-  "created_at": "2026-10-26 19:47:48",
+  "created_at": "2026-10-26 23:58:12",
   "total_training_samples": 119,
   "positive_samples": 74,
   "negative_samples": 45,

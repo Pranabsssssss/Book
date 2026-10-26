@@ -156,42 +156,58 @@ def build_and_train():
     y_list = []
     names = []
 
-    pos_dir = DATASET_DIR / "ir_led_emitting"
-    off_dir = DATASET_DIR / "ir_bulb_off"
-    other_dir = DATASET_DIR / "other_lights"
+    # Directories to search (both core dataset and captured camera dataset)
+    captured_dir = BASE_DIR / "dataset_captured"
+
+    def collect_files(cat_name):
+        seen = set()
+        out = []
+        for parent in [DATASET_DIR / cat_name, captured_dir / cat_name]:
+            if parent.exists():
+                for f in list(parent.glob("*.jpg")) + list(parent.glob("*.png")):
+                    if f.name not in seen:
+                        seen.add(f.name)
+                        out.append(f)
+        return out
 
     # Positive: Active IR LED bulb emitting purple IR light
-    pos_files = list(pos_dir.glob("*.jpg")) + list(pos_dir.glob("*.png"))
-    print(f"[Dataset] Loading {len(pos_files)} Emitting IR LED images (Class 1)...")
-    for f in pos_files:
+    pos_files = collect_files("ir_led_emitting")
+    print(f"[Dataset] Loading & processing {len(pos_files)} Emitting IR LED images (Class 1)...")
+    for idx, f in enumerate(pos_files):
         im = cv2.imread(str(f))
         feat = extract_features_from_image(im)
         if feat is not None:
             X_list.append(feat)
             y_list.append(1.0)
             names.append(f.name)
+        if (idx + 1) % 150 == 0:
+            print(f"  Processed {idx + 1}/{len(pos_files)} emitting frames...")
 
     # Negative 1: Unlit 5mm LED bulb (Class 0)
-    off_files = list(off_dir.glob("*.jpg")) + list(off_dir.glob("*.png"))
-    print(f"[Dataset] Loading {len(off_files)} Unlit 5mm LED bulb images (Class 0)...")
-    for f in off_files:
+    off_files = collect_files("ir_bulb_off")
+    print(f"[Dataset] Loading & processing {len(off_files)} Unlit 5mm LED bulb images (Class 0)...")
+    for idx, f in enumerate(off_files):
         im = cv2.imread(str(f))
         feat = extract_features_from_image(im)
         if feat is not None:
             X_list.append(feat)
             y_list.append(0.0)
             names.append(f.name)
+        if (idx + 1) % 150 == 0:
+            print(f"  Processed {idx + 1}/{len(off_files)} unlit bulb frames...")
 
     # Negative 2: Other light sources / whiteboard drawings / lamps (Class 0)
-    other_files = list(other_dir.glob("*.jpg")) + list(other_dir.glob("*.png"))
-    print(f"[Dataset] Loading {len(other_files)} Non-IR Light images (Class 0)...")
-    for f in other_files:
+    other_files = collect_files("other_lights")
+    print(f"[Dataset] Loading & processing {len(other_files)} Non-IR Light images (Class 0)...")
+    for idx, f in enumerate(other_files):
         im = cv2.imread(str(f))
         feat = extract_features_from_image(im)
         if feat is not None:
             X_list.append(feat)
             y_list.append(0.0)
             names.append(f.name)
+        if (idx + 1) % 150 == 0:
+            print(f"  Processed {idx + 1}/{len(other_files)} other light frames...")
 
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.float32)

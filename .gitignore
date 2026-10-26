@@ -33,4 +33,5 @@ Thumbs.db
 # Smart Notebook runtime data (generated locally on Pi)
 calibration_data/
 saves/
+dataset_captured/
 test_frame*.png

@@ -50,6 +50,11 @@ def parse_args():
         default=IR_THRESHOLD,
         help=f"IR brightness threshold (0-255, default: {IR_THRESHOLD})"
     )
+    parser.add_argument(
+        "--capture",
+        action="store_true",
+        help="Launch the interactive 1000-image camera dataset recorder to capture training data"
+    )
     return parser.parse_args()
 
 
@@ -105,6 +110,18 @@ def select_operating_mode(cli_mode_arg: str) -> str:
 
 def main():
     args = parse_args()
+
+    # Fast-path: Launch 1000-Image Camera Dataset Capture Tool if requested
+    if args.capture:
+        from tools.capture_dataset import main as run_capture
+        sys.argv = [sys.argv[0]]
+        if args.camera:
+            sys.argv.extend(["--camera", args.camera])
+        if args.device is not None:
+            sys.argv.extend(["--device", str(args.device)])
+        run_capture()
+        sys.exit(0)
+
     print("=" * 60)
     print("             SMART NOTEBOOK — IR WHITEBOARD")
     print("=" * 60)
