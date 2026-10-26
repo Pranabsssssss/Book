@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from camera import Camera, normalize_backend
-from config import CAMERA_BACKEND, CAMERA_DEVICE_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT
+from config import CAMERA_BACKEND, CAMERA_DEVICE_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, IR_PURPLE_EXCESS_THRESHOLD
 
 DATASET_DIR = BASE_DIR / "dataset"
 CAPTURED_BACKUP_DIR = BASE_DIR / "dataset_captured"
@@ -57,16 +57,18 @@ def parse_args():
 
 
 def measure_purple_excess(frame_bgr: np.ndarray) -> tuple:
-    """Check live purple excess in the camera frame for real-time feedback."""
+    """Check live purple excess in the camera frame for real-time feedback against empirical > 8.0 threshold."""
     b = frame_bgr[:, :, 0].astype(np.float32)
     g = frame_bgr[:, :, 1].astype(np.float32)
     r = frame_bgr[:, :, 2].astype(np.float32)
     bg = b - g
     rg = r - g
-    purple_active = (bg > 1.5) & ((bg + np.maximum(0.0, rg)) >= 3.0) & (b > 60)
-    if np.sum(purple_active) > 3:
-        max_excess = float(np.max(bg[purple_active] + np.maximum(0.0, rg[purple_active])))
-        return True, max_excess
+    excess = bg + np.maximum(0.0, rg)
+    # Authentic IR condition: B > G + 1.2, R >= G - 2.0 (filters out ambient lamp & pure blue)
+    ir_mask = (bg > 1.2) & (rg >= -2.0) & (b > 45)
+    if np.any(ir_mask):
+        max_excess = float(np.max(excess[ir_mask]))
+        return (max_excess >= IR_PURPLE_EXCESS_THRESHOLD), max_excess
     return False, 0.0
 
 
@@ -92,17 +94,17 @@ def draw_hud(frame_bgr: np.ndarray, cat_idx: int, counts: dict, total_captured: 
     cat_title = f"CATEGORY [{cat_idx}]: {cat['name']}"
     cv2.putText(hud, cat_title, (16, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.58, cat_color, 2)
 
-    # Purple IR live status in top-right
+    # Purple IR live status in top-right (Threshold > 8.0 empirically confirmed by user)
     if purple_detected:
-        p_badge = f"PURPLE IR: DETECTED (+{purple_excess:.0f})"
-        cv2.putText(hud, p_badge, (w - 290, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 100), 2)
+        p_badge = f"IR METER: +{purple_excess:.1f} [IR ON: YES]"
+        cv2.putText(hud, p_badge, (w - 335, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 100), 2)
     else:
-        p_badge = "PURPLE IR: NONE (OFF)"
-        cv2.putText(hud, p_badge, (w - 290, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 140), 1)
+        p_badge = f"IR METER: +{purple_excess:.1f} [IR ON: NO]"
+        cv2.putText(hud, p_badge, (w - 335, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1)
 
     pct = min(100.0, (total_captured / max(1, target)) * 100.0)
-    cnt_txt = f"{total_captured} / {target} ({pct:.1f}%)"
-    cv2.putText(hud, cnt_txt, (w - 290, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
+    cnt_txt = f"{total_captured} / {target} ({pct:.1f}%) | Thresh: >8.0"
+    cv2.putText(hud, cnt_txt, (w - 335, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (230, 230, 230), 1)
 
     # Progress bar line
     bar_y = banner_h - 4

@@ -34,4 +34,5 @@ Thumbs.db
 calibration_data/
 saves/
 dataset_captured/
+dataset/**/user_cam_*.png
 test_frame*.png

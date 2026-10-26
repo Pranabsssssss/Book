@@ -382,6 +382,7 @@ class Whiteboard:
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
             f"Physical 5mm Bulb: {bulb_status_str}",
             f"Bulb Tip Position: {bulb_pos_str}",
+            f"IR Excess Meter  : +{excess_val:.1f} (Threshold: > 8.0) -> {'[IR ON: YES]' if is_emitting else '[IR ON: NO]'}",
             f"Purple IR Light  : {'ACTIVE (EMITTING PURPLE)' if is_emitting else 'OFF / IDLE (PEN LIFTED)'}",
             f"White Board Disc : ACTIVE (Whiteboard drawings 100% rejected)",
             f"Display Bounds   : DocScanner Quad (Active)",

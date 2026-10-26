@@ -7,7 +7,7 @@ from config import (
     IR_THRESHOLD, IR_MIN_AREA, IR_MAX_AREA,
     CAMERA_EDGE_MARGIN_TOP, CAMERA_EDGE_MARGIN_BOTTOM, CAMERA_EDGE_MARGIN_SIDE,
     CAMERA_WIDTH, CAMERA_HEIGHT,
-    IR_SPECTRAL_RATIO_MIN, IR_PURPLE_EXCESS_MIN,
+    IR_SPECTRAL_RATIO_MIN, IR_PURPLE_EXCESS_MIN, IR_PURPLE_EXCESS_THRESHOLD,
     IR_MODEL_FILE, BASE_DIR
 )
 
@@ -231,11 +231,16 @@ class IRDetector:
         bg_diff = b - g
         rg_diff = r - g
 
+        # Empirical Purple Excess Meter across candidate pixels:
+        excess_matrix = bg_diff + np.maximum(0.0, rg_diff)
+        meter_valid = (bg_diff > 1.0) & (rg_diff >= -2.0) & (gray >= 50)
+        frame_max_excess = float(np.max(excess_matrix[meter_valid])) if np.any(meter_valid) else 0.0
+
         # CRITICAL FILTER:
         # Authentic IR light has B > G + 1.0 and positive purple excess (bg_diff + max(0, rg_diff) >= 2.5).
         # Whiteboard monitor white pixels have B <= G and excess <= 0 -> 100% BLOCKED.
         # Room lamps have B < G and excess < 0 -> 100% BLOCKED.
-        purple_active = (bg_diff > 1.0) & ((bg_diff + np.maximum(0.0, rg_diff)) >= 2.5) & (gray >= 70)
+        purple_active = (bg_diff > 1.0) & ((bg_diff + np.maximum(0.0, rg_diff)) >= 2.5) & (gray >= 60)
         purple_mask = np.uint8(purple_active * 255)
 
         # 3x3 Morphological opening to clean single-pixel noise
@@ -287,18 +292,25 @@ class IRDetector:
 
             features = self.extract_candidate_features(patch_bgr, c, peak_val, ar, circ)
 
+            # EMPIRICAL CRITERIA CONFIRMED BY HARDWARE TESTING:
+            # When purple_excess = (B - G) + (R - G) >= 8.0 with B > G,
+            # an authentic emitting IR light is 100% present.
+            is_hardware_ir = (features[1] >= IR_PURPLE_EXCESS_THRESHOLD and features[5] >= 1.5 and features[6] >= -2.0)
+
             if self.has_model:
                 feat_scaled = (features - self.mean) / self.std
                 ml_prob = float(sigmoid(np.dot(feat_scaled, self.weights) + self.bias))
             else:
-                ml_prob = 0.90 if (features[1] >= 6.0 and features[5] >= 2.0) else 0.05
+                ml_prob = 0.95 if is_hardware_ir else 0.05
 
             # STRICT CRITERIA FOR AUTHENTIC IR PURPLE EMISSION:
-            # 1. Model confidence >= 0.50
-            # 2. Blue exceeds Green: B > G + 2.0
-            # 3. Red elevated relative to Green: R >= G - 1.0 (filters out visible blue objects)
-            # 4. Positive purple excess: (B - G) + (R - G) >= 6.0
-            if ml_prob < self.model_threshold or features[5] < 2.0 or features[6] < -1.0 or features[1] < 6.0:
+            # 1. Purple excess >= 8.0 (Empirical hardware threshold confirmed by user)
+            # 2. Blue exceeds Green: B > G + 1.5
+            # 3. Red elevated relative to Green: R >= G - 2.0 (filters out visible blue objects)
+            # 4. Model probability verification (if model available)
+            if not is_hardware_ir and ml_prob < self.model_threshold:
+                continue
+            if features[1] < IR_PURPLE_EXCESS_THRESHOLD or features[5] < 1.5 or features[6] < -2.0:
                 continue
 
             # Display containment check
@@ -327,7 +339,7 @@ class IRDetector:
             })
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        return candidates, purple_cleaned
+        return candidates, purple_cleaned, frame_max_excess
 
     def detect(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
         """
@@ -379,7 +391,7 @@ class IRDetector:
         # -------------------------------------------------------------
         # STEP 1: Check for Active Purple Light Emission
         # -------------------------------------------------------------
-        candidates, purple_mask = self.detect_purple_emission_candidates(frame_bgr, display_quad)
+        candidates, purple_mask, frame_max_excess = self.detect_purple_emission_candidates(frame_bgr, display_quad)
         thresh_rgb = cv2.cvtColor(purple_mask, cv2.COLOR_GRAY2RGB)
 
         metadata = {
@@ -387,7 +399,7 @@ class IRDetector:
             "bulb_state": "SEARCHING",
             "is_emitting": False,
             "bulb_pos": None,
-            "purple_excess": 0.0,
+            "purple_excess": frame_max_excess,
             "spectral_ratio": 1.0,
             "circularity": 0.0,
             "in_display_area": True,
@@ -420,13 +432,13 @@ class IRDetector:
             cv2.line(annotated, (int(bcx), int(bcy) - 18), (int(bcx), int(bcy) + 18), reticle_col, 2)
 
             # 3. Informational HUD tag
-            badge = f"IR LED: EMITTING (Purple +{excess:.0f}) -> ({int(bcx)}, {int(bcy)}) [{status_text}]"
+            badge = f"IR LED: EMITTING (Meter +{excess:.1f} > 8.0) -> ({int(bcx)}, {int(bcy)}) [{status_text}]"
             cv2.putText(annotated, badge, (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 100), 2)
 
             # Mark on threshold mask
             cv2.circle(thresh_rgb, (int(bcx), int(bcy)), 10, (0, 255, 0), 2)
-            cv2.putText(thresh_rgb, f"PURPLE IR EMISSION DETECTED (+{excess:.0f})", (15, 30),
+            cv2.putText(thresh_rgb, f"PURPLE IR DETECTED: +{excess:.1f} (THRESHOLD > 8.0)", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
 
             metadata["bulb_state"] = "EMITTING"
@@ -472,13 +484,13 @@ class IRDetector:
                             (255, 220, 40), 2, tipLength=0.35)
 
             # 3. Label tag
-            label = f"[5mm LED BULB LOCATED] Tip: ({itip_x}, {itip_y}) | STATE: IDLE (OFF - Press button to draw)"
+            label = f"[5mm LED BULB LOCATED] Tip: ({itip_x}, {itip_y}) | Meter: +{frame_max_excess:.1f} (IDLE <= 8.0)"
             cv2.putText(annotated, label, (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, cyan_col, 2)
 
             # On threshold mask: indicate tracked position
             cv2.rectangle(thresh_rgb, (bx, by), (bx + bw, by + bh), (0, 200, 255), 1)
-            cv2.putText(thresh_rgb, f"5mm BULB LOCATED: IDLE (NO EMISSION)", (15, 30),
+            cv2.putText(thresh_rgb, f"5mm BULB LOCATED: IDLE (Meter: +{frame_max_excess:.1f} <= 8.0)", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
 
             metadata["bulb_state"] = "LOCATED_IDLE"
@@ -491,10 +503,10 @@ class IRDetector:
             return None, annotated, thresh_rgb, metadata
 
         # CASE C: No bulb and no purple light in view
-        cv2.putText(annotated, "SEARCHING FOR 5mm LED BULB / IR LIGHT...", (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 180, 180), 2)
-        cv2.putText(thresh_rgb, "SEARCHING (NO BULB / NO PURPLE LIGHT)", (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, (160, 160, 160), 2)
+        cv2.putText(annotated, f"SEARCHING FOR 5mm LED BULB / IR LIGHT (Meter: +{frame_max_excess:.1f})", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 2)
+        cv2.putText(thresh_rgb, f"SEARCHING (Meter: +{frame_max_excess:.1f} <= 8.0 IDLE)", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 2)
 
         return None, annotated, thresh_rgb, metadata
 
