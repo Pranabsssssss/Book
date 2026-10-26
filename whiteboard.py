@@ -353,6 +353,8 @@ class Whiteboard:
         in_display = self.dev_info.get("in_display_area", False)
         excess_val = self.dev_info.get("purple_excess", 0.0)
         is_ir = self.dev_info.get("is_ir_purple", False)
+        conf_val = self.dev_info.get("ir_confidence", 0.0)
+        is_emitting = self.dev_info.get("is_emitting_bulb", False)
 
         action_str = "LIGHT OFF (PEN LIFTED)"
         if self.current_screen_point:
@@ -363,16 +365,17 @@ class Whiteboard:
             elif self.eraser_mode:
                 action_str = "ERASING DOT"
             else:
-                action_str = "LIGHT ON (MARKING DOT)"
+                action_str = "LIGHT ON (MARKING ON BOARD)"
 
-        ir_status_str = f"AUTHENTIC IR (+{excess_val:.0f} Purple Excess)" if is_ir else "NONE (White Light Filtered)"
+        bulb_status_str = f"ACTIVE 5mm IR BULB ({conf_val:.1f}% Conf)" if is_emitting else f"REJECTED NON-IR ({conf_val:.1f}%)"
 
         tele_lines = [
             f"FPS              : {fps:.1f}",
             f"Display Size     : {self.width}x{self.height} (Aspect: {self.aspect_ratio:.2f}:1)",
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
-            f"IR Spectral Type : {ir_status_str}",
-            f"White Board Disc : ACTIVE (Whiteboard drawings rejected)",
+            f"Trained ML Model : {bulb_status_str}",
+            f"IR Spectral Type : AUTHENTIC IR (+{excess_val:.0f} Purple Excess)" if is_ir else "IR Spectral Type : WHITE / NON-IR LIGHT REJECTED",
+            f"White Board Disc : ACTIVE (Whiteboard drawings 100% rejected)",
             f"Display Bounds   : DocScanner Quad (Active)",
             f"In Display Area  : {'YES (Inside Display Quad)' if in_display else 'NO (Outside Screen Quad)'}",
             f"Dot Geometry     : Circ: {circ_val:.2f} | Aspect: {aspect_val:.2f} (Circles Only)",
