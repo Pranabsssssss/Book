@@ -83,9 +83,9 @@ CAMERA_FPS = 30
 
 # Ignore bright spots located on the very outer border of the camera frame
 # (Ceiling lights, lamps, and monitor bezel glares are typically at the top/sides of the FOV)
-CAMERA_EDGE_MARGIN_TOP = 20
-CAMERA_EDGE_MARGIN_BOTTOM = 10
-CAMERA_EDGE_MARGIN_SIDE = 10
+CAMERA_EDGE_MARGIN_TOP = 35
+CAMERA_EDGE_MARGIN_BOTTOM = 15
+CAMERA_EDGE_MARGIN_SIDE = 15
 
 # === IR / White Light Detection ===
 # Brightness threshold (0-255). Values above this are considered bright IR/white light.
@@ -102,10 +102,10 @@ IR_SPECTRAL_RATIO_MIN = 1.14      # (R + B) / (2 * max(G, 1)) must exceed this t
 IR_PURPLE_EXCESS_MIN = 8.0        # (B - G) + (R - G) must exceed this (calibrated to >= 8.0)
 
 # Minimum and maximum contour areas in pixels.
-# An IR LED / remote light tip is compact (typically 3 - 150 px).
-# Blobs larger than 180px are ambient ceiling fixtures or window glare, not an IR pen tip.
-IR_MIN_AREA = 3
-IR_MAX_AREA = 180
+# An IR LED / remote light tip is compact (typically 4 - 500 px).
+# Blobs larger than 500px are ambient ceiling fixtures or window glare, not an IR pen tip.
+IR_MIN_AREA = 4
+IR_MAX_AREA = 500
 
 # === Pen & Eraser Configuration ===
 PEN_COLOR = (255, 255, 255)    # Pure white

@@ -211,6 +211,9 @@ def main():
             )
             screen_point = transformer.transform(cam_point) if cam_point is not None else None
 
+            in_bounds = metadata.get("in_display_area", True)
+            is_active_emit = metadata.get("is_emitting", False)
+
             if whiteboard.dev_mode:
                 # Testing / Development Mode: full OpenCV diagnostics and live test pad
                 whiteboard.update_dev_overlay(
@@ -219,15 +222,14 @@ def main():
                     info=metadata,
                     screen_point=screen_point
                 )
-                # In Dev Mode, always send point to test pad so user sees their LED drawing!
-                if screen_point is not None:
+                # In Dev Mode test pad: draw only when LED is actively emitting and inside screen quad
+                if screen_point is not None and is_active_emit and in_bounds:
                     whiteboard.handle_point(screen_point)
                 else:
                     whiteboard.handle_no_point()
             else:
-                # Production Mode: only draw if inside the calibrated display quad
-                in_bounds = metadata.get("in_display_area", True)
-                if screen_point is not None and in_bounds:
+                # Production Mode: only draw if actively emitting inside the calibrated display quad
+                if screen_point is not None and is_active_emit and in_bounds:
                     whiteboard.handle_point(screen_point)
                 else:
                     whiteboard.handle_no_point()

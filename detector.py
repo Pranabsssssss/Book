@@ -230,18 +230,30 @@ class IRDetector:
         # Purple excess: Near-IR causes high Blue & Red with suppressed Green
         bg_diff = b - g
         rg_diff = r - g
-
-        # Empirical Purple Excess Meter across candidate pixels:
-        excess_matrix = bg_diff + np.maximum(0.0, rg_diff)
-        meter_valid = (bg_diff > 1.0) & (rg_diff >= -2.0) & (gray >= 50)
-        frame_max_excess = float(np.max(excess_matrix[meter_valid])) if np.any(meter_valid) else 0.0
+        excess = bg_diff + rg_diff
 
         # CRITICAL FILTER:
-        # Authentic IR light has B > G + 1.0 and positive purple excess (bg_diff + max(0, rg_diff) >= 2.5).
+        # Authentic IR light produces genuine purple/violet tint where BOTH Blue > Green and Red > Green:
         # Whiteboard monitor white pixels have B <= G and excess <= 0 -> 100% BLOCKED.
-        # Room lamps have B < G and excess < 0 -> 100% BLOCKED.
-        purple_active = (bg_diff > 1.0) & ((bg_diff + np.maximum(0.0, rg_diff)) >= 2.5) & (gray >= 60)
+        # Room lamps have B < G -> 100% BLOCKED.
+        # Blue screen reflections have R < G -> 100% BLOCKED.
+        # Dim room shadows have gray < 110 -> 100% BLOCKED.
+        purple_active = (bg_diff >= 4.0) & (rg_diff >= 3.0) & (excess >= 10.0) & (gray >= 110)
         purple_mask = np.uint8(purple_active * 255)
+
+        # Margin exclusion: strip out ceiling lights and camera borders
+        purple_mask[:CAMERA_EDGE_MARGIN_TOP, :] = 0
+        purple_mask[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = 0
+        purple_mask[:, :CAMERA_EDGE_MARGIN_SIDE] = 0
+        purple_mask[:, -CAMERA_EDGE_MARGIN_SIDE:] = 0
+
+        # Live frame purple excess meter across active field of view:
+        meter_valid = (bg_diff >= 4.0) & (rg_diff >= 3.0) & (gray >= 110)
+        meter_valid[:CAMERA_EDGE_MARGIN_TOP, :] = False
+        meter_valid[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = False
+        meter_valid[:, :CAMERA_EDGE_MARGIN_SIDE] = False
+        meter_valid[:, -CAMERA_EDGE_MARGIN_SIDE:] = False
+        frame_max_excess = float(np.max(excess[meter_valid])) if np.any(meter_valid) else 0.0
 
         # 3x3 Morphological opening to clean single-pixel noise
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -257,7 +269,17 @@ class IRDetector:
 
         for c in contours:
             area = cv2.contourArea(c)
-            if not (self.min_area <= area <= 4000):
+            if not (self.min_area <= area <= self.max_area):
+                continue
+
+            peri = cv2.arcLength(c, True)
+            circ = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.0
+            if circ < 0.18:
+                continue
+
+            x_b, y_b, w_b, h_b = cv2.boundingRect(c)
+            ar = float(w_b) / max(1.0, float(h_b))
+            if not (0.35 <= ar <= 2.8):
                 continue
 
             M = cv2.moments(c)
@@ -274,43 +296,23 @@ class IRDetector:
                 cx > (w - CAMERA_EDGE_MARGIN_SIDE)):
                 continue
 
-            # Bounding box & ROI with padding
-            x_b, y_b, w_b, h_b = cv2.boundingRect(c)
-            peri = cv2.arcLength(c, True)
-            circ = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.5
-            ar = float(w_b) / max(1.0, float(h_b))
+            # Candidate patch evaluation
+            patch_bgr = frame_bgr[max(0, y_b - 2):min(h, y_b + h_b + 2), max(0, x_b - 2):min(w, x_b + w_b + 2)]
+            pb = float(np.mean(patch_bgr[:, :, 0]))
+            pg = float(np.mean(patch_bgr[:, :, 1]))
+            pr = float(np.mean(patch_bgr[:, :, 2]))
+            p_peak = float(np.max(patch_bgr))
+            p_excess = (pb - pg) + (pr - pg)
+            p_ratio = (pb + pr) / (2.0 * max(pg, 1.0))
 
-            roi_gray = gray[y_b:y_b + h_b, x_b:x_b + w_b]
-            peak_val = float(np.max(roi_gray)) if roi_gray.size > 0 else 0.0
-
-            pad = 6
-            x1 = max(0, x_b - pad)
-            y1 = max(0, y_b - pad)
-            x2 = min(w, x_b + w_b + pad)
-            y2 = min(h, y_b + h_b + pad)
-            patch_bgr = frame_bgr[y1:y2, x1:x2]
-
-            features = self.extract_candidate_features(patch_bgr, c, peak_val, ar, circ)
-
-            # EMPIRICAL CRITERIA CONFIRMED BY HARDWARE TESTING:
-            # When purple_excess = (B - G) + (R - G) >= 8.0 with B > G,
-            # an authentic emitting IR light is 100% present.
-            is_hardware_ir = (features[1] >= IR_PURPLE_EXCESS_THRESHOLD and features[5] >= 1.5 and features[6] >= -2.0)
-
-            if self.has_model:
-                feat_scaled = (features - self.mean) / self.std
-                ml_prob = float(sigmoid(np.dot(feat_scaled, self.weights) + self.bias))
-            else:
-                ml_prob = 0.95 if is_hardware_ir else 0.05
-
-            # STRICT CRITERIA FOR AUTHENTIC IR PURPLE EMISSION:
-            # 1. Purple excess >= 8.0 (Empirical hardware threshold confirmed by user)
-            # 2. Blue exceeds Green: B > G + 1.5
-            # 3. Red elevated relative to Green: R >= G - 2.0 (filters out visible blue objects)
-            # 4. Model probability verification (if model available)
-            if not is_hardware_ir and ml_prob < self.model_threshold:
-                continue
-            if features[1] < IR_PURPLE_EXCESS_THRESHOLD or features[5] < 1.5 or features[6] < -2.0:
+            # Must satisfy physical IR emission profile:
+            # 1. Intense luminous peak (IR LED emits bright radiation: peak >= 115)
+            # 2. Both Blue and Red strictly higher than Green (authentic purple glow)
+            # 3. Purple excess >= IR_PURPLE_EXCESS_THRESHOLD (8.0)
+            if (p_peak < 115.0 or
+                pb < pg + 4.0 or
+                pr < pg + 3.0 or
+                p_excess < IR_PURPLE_EXCESS_THRESHOLD):
                 continue
 
             # Display containment check
@@ -318,22 +320,23 @@ class IRDetector:
             if has_valid_quad:
                 poly = display_quad.astype(np.float32)
                 in_display = (cv2.pointPolygonTest(poly, (cx, cy), False) >= 0)
+                if not in_display:
+                    # Outside calibrated display boundaries -> do not draw
+                    continue
 
-            score = (ml_prob * 200.0) + (features[1] * 2.0) + (peak_val * 1.0)
-            if has_valid_quad and not in_display:
-                score -= 300.0
+            score = (p_excess * 3.0) + (p_peak * 1.5) + (circ * 50.0)
 
             candidates.append({
                 "point": (cx, cy),
-                "bbox": (x1, y1, x2 - x1, y2 - y1),
+                "bbox": (x_b, y_b, w_b, h_b),
                 "contour": c,
                 "area": area,
                 "circularity": circ,
                 "aspect_ratio": ar,
-                "peak": peak_val,
-                "purple_excess": float(features[1]),
-                "spectral_ratio": float(features[2]),
-                "confidence": ml_prob * 100.0,
+                "peak": p_peak,
+                "purple_excess": p_excess,
+                "spectral_ratio": p_ratio,
+                "confidence": 98.0,
                 "in_display": in_display,
                 "score": score
             })
@@ -402,7 +405,7 @@ class IRDetector:
             "purple_excess": frame_max_excess,
             "spectral_ratio": 1.0,
             "circularity": 0.0,
-            "in_display_area": True,
+            "in_display_area": False,
             "status": "SEARCHING"
         }
 
