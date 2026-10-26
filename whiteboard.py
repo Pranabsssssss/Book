@@ -353,8 +353,10 @@ class Whiteboard:
         in_display = self.dev_info.get("in_display_area", False)
         excess_val = self.dev_info.get("purple_excess", 0.0)
         is_ir = self.dev_info.get("is_ir_purple", False)
-        conf_val = self.dev_info.get("ir_confidence", 0.0)
-        is_emitting = self.dev_info.get("is_emitting_bulb", False)
+        is_emitting = self.dev_info.get("is_emitting", False)
+        bulb_state = self.dev_info.get("bulb_state", "SEARCHING")
+        bulb_pos = self.dev_info.get("bulb_pos")
+        bulb_pos_str = f"({bulb_pos[0]:.1f}, {bulb_pos[1]:.1f})" if bulb_pos else "SEARCHING"
 
         action_str = "LIGHT OFF (PEN LIFTED)"
         if self.current_screen_point:
@@ -367,14 +369,20 @@ class Whiteboard:
             else:
                 action_str = "LIGHT ON (MARKING ON BOARD)"
 
-        bulb_status_str = f"ACTIVE 5mm IR BULB ({conf_val:.1f}% Conf)" if is_emitting else f"REJECTED NON-IR ({conf_val:.1f}%)"
+        if is_emitting:
+            bulb_status_str = f"EMITTING PURPLE IR (+{excess_val:.0f} Excess) [DRAWING]"
+        elif bulb_state == "LOCATED_IDLE":
+            bulb_status_str = f"5mm BULB LOCATED AT {bulb_pos_str} [IDLE - PRESS BUTTON TO DRAW]"
+        else:
+            bulb_status_str = "SEARCHING FOR 5mm LED BULB..."
 
         tele_lines = [
             f"FPS              : {fps:.1f}",
             f"Display Size     : {self.width}x{self.height} (Aspect: {self.aspect_ratio:.2f}:1)",
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
-            f"Trained ML Model : {bulb_status_str}",
-            f"IR Spectral Type : AUTHENTIC IR (+{excess_val:.0f} Purple Excess)" if is_ir else "IR Spectral Type : WHITE / NON-IR LIGHT REJECTED",
+            f"Physical 5mm Bulb: {bulb_status_str}",
+            f"Bulb Tip Position: {bulb_pos_str}",
+            f"Purple IR Light  : {'ACTIVE (EMITTING PURPLE)' if is_emitting else 'OFF / IDLE (PEN LIFTED)'}",
             f"White Board Disc : ACTIVE (Whiteboard drawings 100% rejected)",
             f"Display Bounds   : DocScanner Quad (Active)",
             f"In Display Area  : {'YES (Inside Display Quad)' if in_display else 'NO (Outside Screen Quad)'}",

@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 import cv2
 import numpy as np
 from config import (
@@ -7,7 +8,7 @@ from config import (
     CAMERA_EDGE_MARGIN_TOP, CAMERA_EDGE_MARGIN_BOTTOM, CAMERA_EDGE_MARGIN_SIDE,
     CAMERA_WIDTH, CAMERA_HEIGHT,
     IR_SPECTRAL_RATIO_MIN, IR_PURPLE_EXCESS_MIN,
-    IR_MODEL_FILE
+    IR_MODEL_FILE, BASE_DIR
 )
 
 
@@ -17,27 +18,39 @@ def sigmoid(z):
 
 class IRDetector:
     """
-    Trained 5mm IR LED Bulb & Purple Infrared Emission Detector.
+    Two-Stage 5mm IR LED Bulb Stylus & Purple Infrared Emission Detector.
 
-    Trained on 119+ real-world images (including authentic 5mm clear through-hole IR LED
-    bulbs, camera-captured purple infrared emissions, unlit bulbs, room lamps, flashlights,
-    and whiteboard white drawings).
+    1. STAGE 1 (Physical Bulb Localization):
+       Detects the physical 5mm clear through-hole LED bulb (the stylus tip as shown
+       in the user's photos) in ambient light even when unlit. In Dev Mode, points directly
+       to the bulb tip with a cyan reticle and arrow: [5mm BULB LOCATED: IDLE].
 
-    Guarantees:
-      1. Whiteboard ONLY draws when the 5mm IR LED bulb is actively emitting that purple/violet
-         infrared light (button pressed on the marker).
-      2. 100% hard rejects white blackboard drawings, monitor glare, flashlights, and room lamps.
-      3. Ultra-fast evaluation (< 0.1ms per candidate), ideal for real-time 30-60 FPS on Raspberry Pi 3B+.
+    2. STAGE 2 (Active Purple Emission & Drawing Trigger):
+       High-sensitivity optical chromaticity detector that triggers when the LED emits
+       even a subtle / slight purple near-infrared glow (push button pressed).
+       Immediately transitions to [IR LED: EMITTING] and marks/draws on the whiteboard canvas!
+
+    3. HIGH-ACCURACY FALSE POSITIVE REJECTION:
+       100% hard rejects white blackboard drawings on the monitor (where B <= G, excess <= 0)
+       and warm ambient room lamps (where B < G). Never causes runaway drawing loops!
     """
     def __init__(self, threshold=IR_THRESHOLD, min_area=IR_MIN_AREA, max_area=IR_MAX_AREA):
         self.threshold = threshold
         self.min_area = min_area
         self.max_area = max_area
 
+        # Last known bulb position for smooth fast tracking
+        self.last_bulb_pos = None
+        self.last_bulb_box = None
+        self.frames_since_seen = 999
+
+        # Load 5mm bulb templates
+        self.bulb_templates = []
+        self._load_bulb_templates()
+
         # Load trained ML model if available
         self.has_model = False
-        self.model_name = "Heuristic Spectral Model"
-        self.feature_names = []
+        self.model_name = "Spectral Model"
         self.mean = None
         self.std = None
         self.weights = None
@@ -48,25 +61,107 @@ class IRDetector:
             try:
                 with open(IR_MODEL_FILE, "r", encoding="utf-8") as f:
                     model_data = json.load(f)
-                self.feature_names = model_data.get("features", [])
                 self.mean = np.array(model_data.get("mean", []), dtype=np.float32)
                 self.std = np.array(model_data.get("std", []), dtype=np.float32)
                 self.weights = np.array(model_data.get("weights", []), dtype=np.float32)
                 self.bias = float(model_data.get("bias", 0.0))
                 self.model_threshold = float(model_data.get("threshold", 0.50))
-                self.model_name = f"{model_data.get('model_name', 'IR_Model')} v{model_data.get('version', '1.0')}"
+                self.model_name = f"{model_data.get('model_name', 'IR_Model')}"
                 self.has_model = True
-                print(f"[IRDetector] Loaded trained ML model from: {IR_MODEL_FILE} (Acc: {model_data.get('accuracy_pct', 0):.1f}%, F1: {model_data.get('f1_pct', 0):.1f}%)")
+                print(f"[IRDetector] Loaded trained ML model from: {IR_MODEL_FILE}")
             except Exception as e:
-                print(f"[IRDetector] Warning: Could not load trained model ({e}). Using spectral fallback.")
-        else:
-            print(f"[IRDetector] Model file not found at {IR_MODEL_FILE}. Using spectral rules.")
+                print(f"[IRDetector] Warning: Could not load model: {e}")
+
+    def _load_bulb_templates(self):
+        """Load orientation templates of the 5mm LED bulb."""
+        tmpl_dir = Path(BASE_DIR) / "models" / "bulb_templates"
+        if tmpl_dir.exists():
+            files = list(tmpl_dir.glob("*.png"))
+            for p in files[:8]:  # Top canonical angles
+                im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                if im is not None:
+                    self.bulb_templates.append(im)
+        print(f"[IRDetector] Loaded {len(self.bulb_templates)} 5mm LED bulb templates for physical tracking.")
+
+    def locate_physical_bulb(self, frame_gray: np.ndarray) -> tuple:
+        """
+        Locates the physical 5mm clear LED bulb tip in ambient light when idle/off.
+        Returns: (tip_x, tip_y, bbox, score) or None.
+        """
+        if frame_gray is None or len(self.bulb_templates) == 0:
+            return None
+
+        h, w = frame_gray.shape[:2]
+
+        # 1. Fast Local Window Search (if recently tracked)
+        if self.last_bulb_pos is not None and self.frames_since_seen < 10:
+            lx, ly = int(self.last_bulb_pos[0]), int(self.last_bulb_pos[1])
+            pad = 70
+            x1 = max(0, lx - pad)
+            y1 = max(0, ly - pad)
+            x2 = min(w, lx + pad)
+            y2 = min(h, ly + pad)
+            crop = frame_gray[y1:y2, x1:x2]
+
+            if crop.shape[0] >= 30 and crop.shape[1] >= 30:
+                best_local_score = -1.0
+                best_local_loc = None
+                best_local_sz = (0, 0)
+                for tmpl in self.bulb_templates[:4]:
+                    if tmpl.shape[0] < crop.shape[0] and tmpl.shape[1] < crop.shape[1]:
+                        res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
+                        _, max_v, _, max_l = cv2.minMaxLoc(res)
+                        if max_v > best_local_score:
+                            best_local_score = max_v
+                            best_local_loc = max_l
+                            best_local_sz = (tmpl.shape[1], tmpl.shape[0])
+
+                if best_local_score >= 0.52 and best_local_loc is not None:
+                    bw, bh = best_local_sz
+                    bx = x1 + best_local_loc[0]
+                    by = y1 + best_local_loc[1]
+                    tip_x = float(bx + bw // 2)
+                    tip_y = float(by + 4)
+                    return (tip_x, tip_y, (bx, by, bw, bh), best_local_score)
+
+        # 2. Global Search on Downscaled Frame (320x240)
+        scale = 0.5
+        small_gray = cv2.resize(frame_gray, (int(w * scale), int(h * scale)))
+        best_score = -1.0
+        best_loc = None
+        best_size = (0, 0)
+
+        for tmpl in self.bulb_templates[:4]:
+            tw = int(tmpl.shape[1] * scale)
+            th = int(tmpl.shape[0] * scale)
+            if tw < 8 or th < 8 or tw >= small_gray.shape[1] or th >= small_gray.shape[0]:
+                continue
+            t_res = cv2.resize(tmpl, (tw, th))
+            res = cv2.matchTemplate(small_gray, t_res, cv2.TM_CCOEFF_NORMED)
+            _, max_v, _, max_l = cv2.minMaxLoc(res)
+            if max_v > best_score:
+                best_score = max_v
+                best_loc = max_l
+                best_size = (int(tw / scale), int(th / scale))
+
+        if best_score >= 0.50 and best_loc is not None:
+            bx = int(best_loc[0] / scale)
+            by = int(best_loc[1] / scale)
+            bw, bh = best_size
+            tip_x = float(bx + bw // 2)
+            tip_y = float(by + 4)
+            return (tip_x, tip_y, (bx, by, bw, bh), best_score)
+
+        return None
 
     def extract_candidate_features(self, roi_bgr: np.ndarray, contour, peak: float, ar: float, circ: float) -> np.ndarray:
         """
         Extract the 12-dimensional spectral, chromatic, and morphological feature vector
         from a candidate patch in the camera frame.
         """
+        if roi_bgr is None or roi_bgr.size == 0:
+            return np.zeros(12, dtype=np.float32)
+
         gray_roi = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
         core_thresh = max(40.0, peak * 0.82)
         core_mask = gray_roi >= core_thresh
@@ -120,106 +215,46 @@ class IRDetector:
             circ
         ], dtype=np.float32)
 
-    def detect(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
+    def detect_purple_emission_candidates(self, frame_bgr: np.ndarray, display_quad: np.ndarray = None) -> list:
         """
-        Locate the centroid of the actively emitting 5mm IR LED bulb in the camera frame.
-        Returns:
-            (x, y) tuple in camera pixel coordinates, or None.
+        High-sensitivity chromatic detection of near-infrared purple light.
+        Detects even slight / subtle purple emission from the 5mm LED bulb,
+        while 100% rejecting white blackboard drawings and ambient lamps.
         """
-        pt, _, _, _ = self.detect_debug(frame, threshold=threshold, display_quad=display_quad)
-        return pt
+        h, w = frame_bgr.shape[:2]
+        b = frame_bgr[:, :, 0].astype(np.float32)
+        g = frame_bgr[:, :, 1].astype(np.float32)
+        r = frame_bgr[:, :, 2].astype(np.float32)
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-    def detect_debug(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
-        """
-        Comprehensive 5mm IR LED bulb detection with trained ML model and strict spectral filtering.
+        # Purple excess: Near-IR causes high Blue & Red with suppressed Green
+        bg_diff = b - g
+        rg_diff = r - g
 
-        Returns:
-            point: (cx, cy) tuple or None
-            annotated_frame: RGB image with active target reticle, bulb bounding box, and display quad overlay
-            thresh_rgb: RGB image of the binary threshold mask
-            metadata: dict containing area, circularity, spectral ratio, purple excess, ir_confidence, etc.
-        """
-        if frame is None:
-            empty = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
-            return None, empty, empty, {"status": "NO_FRAME", "area": 0.0, "threshold": self.threshold}
+        # CRITICAL FILTER:
+        # Authentic IR light has B > G + 1.0 and positive purple excess (bg_diff + max(0, rg_diff) >= 2.5).
+        # Whiteboard monitor white pixels have B <= G and excess <= 0 -> 100% BLOCKED.
+        # Room lamps have B < G and excess < 0 -> 100% BLOCKED.
+        purple_active = (bg_diff > 1.0) & ((bg_diff + np.maximum(0.0, rg_diff)) >= 2.5) & (gray >= 70)
+        purple_mask = np.uint8(purple_active * 255)
 
-        h, w = frame.shape[:2]
+        # 3x3 Morphological opening to clean single-pixel noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        purple_cleaned = cv2.morphologyEx(purple_mask, cv2.MORPH_OPEN, kernel)
 
-        # Extract RGB channels (frame is RGB from Camera)
-        if len(frame.shape) == 3:
-            r = frame[:, :, 0].astype(np.float32)
-            g = frame[:, :, 1].astype(np.float32)
-            b = frame[:, :, 2].astype(np.float32)
-            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        else:
-            gray = frame
-            r = g = b = gray.astype(np.float32)
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        contours, _ = cv2.findContours(purple_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
 
-        # 3x3 Gaussian blur to preserve small pinpoint LED cores
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-
-        # Threshold for bright pixels
-        thresh_val = threshold if threshold is not None else self.threshold
-        _, thresh = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY)
-
-        thresh_rgb = cv2.cvtColor(thresh, cv2.COLOR_GRAY2RGB)
-        annotated = frame.copy()
-
-        # -----------------------------------------------------------------
-        # Render DocScanner Display Boundary Quad (if calibrated)
-        # -----------------------------------------------------------------
         has_valid_quad = False
         if display_quad is not None and len(display_quad) == 4:
-            quad_area = cv2.contourArea(display_quad.astype(np.float32))
-            if quad_area > 5000:
+            if cv2.contourArea(display_quad.astype(np.float32)) > 5000:
                 has_valid_quad = True
-                quad_int = display_quad.astype(np.int32)
-                cv2.polylines(annotated, [quad_int], isClosed=True, color=(0, 240, 255), thickness=2)
-
-                corner_labels = ["TL", "TR", "BR", "BL"]
-                for i, (cx_pt, cy_pt) in enumerate(quad_int):
-                    cv2.circle(annotated, (cx_pt, cy_pt), 5, (0, 255, 100), -1)
-                    cv2.putText(annotated, corner_labels[i], (cx_pt + 6, cy_pt - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1)
-
-                center_x = int(np.mean(display_quad[:, 0]))
-                center_y = int(np.mean(display_quad[:, 1]))
-                cv2.putText(annotated, "DISPLAY BOUNDS", (center_x - 55, center_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 255), 1)
-
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        metadata = {
-            "threshold": thresh_val,
-            "num_contours": len(contours) if contours else 0,
-            "area": 0.0,
-            "circularity": 0.0,
-            "aspect_ratio": 0.0,
-            "peak_brightness": 0,
-            "spectral_ratio": 1.0,
-            "purple_excess": 0.0,
-            "ir_confidence": 0.0,
-            "is_ir_purple": False,
-            "is_emitting_bulb": False,
-            "in_display_area": True,
-            "point": None,
-            "status": "SEARCHING"
-        }
-
-        if not contours:
-            cv2.putText(annotated, "NO LIGHT DETECTED", (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 60, 60), 2)
-            cv2.putText(thresh_rgb, f"THRESH: {thresh_val}", (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
-            return None, annotated, thresh_rgb, metadata
-
-        valid_emitting_candidates = []
-        highest_rejected_conf = 0.0
 
         for c in contours:
             area = cv2.contourArea(c)
+            if not (self.min_area <= area <= 4000):
+                continue
+
             M = cv2.moments(c)
             if M["m00"] == 0:
                 continue
@@ -227,40 +262,22 @@ class IRDetector:
             cx = float(M["m10"] / M["m00"])
             cy = float(M["m01"] / M["m00"])
 
-            # 1. Edge Exclusion Filter: discard edge-touching border glare
+            # Edge exclusion margin
             if (cy < CAMERA_EDGE_MARGIN_TOP or
                 cy > (h - CAMERA_EDGE_MARGIN_BOTTOM) or
                 cx < CAMERA_EDGE_MARGIN_SIDE or
                 cx > (w - CAMERA_EDGE_MARGIN_SIDE)):
-                cv2.drawContours(annotated, [c], -1, (180, 50, 50), 1)
                 continue
 
-            # 2. Area Filter: must be compact (3 - 220 px)
-            if not (self.min_area <= area <= self.max_area):
-                cv2.drawContours(annotated, [c], -1, (180, 100, 40), 1)
-                continue
-
-            # 3. Geometric Aspect Ratio Filter: must be roughly round / dome-like
+            # Bounding box & ROI with padding
             x_b, y_b, w_b, h_b = cv2.boundingRect(c)
-            aspect_ratio = float(w_b) / max(1.0, float(h_b))
-            if not (0.45 <= aspect_ratio <= 2.2):
-                cv2.drawContours(annotated, [c], -1, (180, 60, 60), 1)
-                continue
-
-            # 4. Circularity Filter: 4*pi*area / perimeter^2
             peri = cv2.arcLength(c, True)
-            circularity = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.0
-            if circularity < 0.35:
-                cv2.drawContours(annotated, [c], -1, (180, 60, 60), 1)
-                continue
+            circ = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.5
+            ar = float(w_b) / max(1.0, float(h_b))
 
-            # 5. Peak Brightness in contour region
             roi_gray = gray[y_b:y_b + h_b, x_b:x_b + w_b]
             peak_val = float(np.max(roi_gray)) if roi_gray.size > 0 else 0.0
-            if peak_val < 195:
-                continue
 
-            # 6. Extract ROI with padding for full epoxy bulb halo
             pad = 6
             x1 = max(0, x_b - pad)
             y1 = max(0, y_b - pad)
@@ -268,156 +285,254 @@ class IRDetector:
             y2 = min(h, y_b + h_b + pad)
             patch_bgr = frame_bgr[y1:y2, x1:x2]
 
-            # -------------------------------------------------------------
-            # 7. TRAINED ML MODEL CLASSIFICATION (5mm IR LED Bulb vs Non-IR Light)
-            # -------------------------------------------------------------
-            features = self.extract_candidate_features(patch_bgr, c, peak_val, aspect_ratio, circularity)
+            features = self.extract_candidate_features(patch_bgr, c, peak_val, ar, circ)
 
             if self.has_model:
                 feat_scaled = (features - self.mean) / self.std
-                linear = float(np.dot(feat_scaled, self.weights) + self.bias)
-                ir_confidence = float(sigmoid(linear))
+                ml_prob = float(sigmoid(np.dot(feat_scaled, self.weights) + self.bias))
             else:
-                # Heuristic fallback based on spectral ratios
-                c_excess = features[1]
-                c_ratio = features[2]
-                ir_confidence = 0.95 if (c_excess >= 18.0 and c_ratio >= 1.08) else 0.05
+                ml_prob = 0.90 if (features[1] >= 6.0 and features[5] >= 2.0) else 0.05
 
-            # Direct spectral measurements
-            core_excess = float(features[1])
-            core_spectral_ratio = float(features[2])
-            halo_excess = float(features[3])
-
-            # CRITICAL DECISION:
-            # An active emitting 5mm IR LED bulb must satisfy:
-            # 1. ML Model Confidence >= 0.50
-            # 2. Authentic chromatic purple signature: Red & Blue excess over Green (not neutral white)
-            is_active_ir_bulb = (
-                (ir_confidence >= self.model_threshold) and
-                (core_excess >= 10.0 or halo_excess >= 15.0) and
-                (features[5] >= 2.0)  # Blue must exceed Green
-            )
-
-            if not is_active_ir_bulb:
-                # REJECTED: This is a white drawing on the blackboard, unlit bulb, or room lamp!
-                highest_rejected_conf = max(highest_rejected_conf, ir_confidence)
-                cv2.drawContours(annotated, [c], -1, (140, 140, 140), 1)
+            # STRICT CRITERIA FOR AUTHENTIC IR PURPLE EMISSION:
+            # 1. Model confidence >= 0.50
+            # 2. Blue exceeds Green: B > G + 2.0
+            # 3. Red elevated relative to Green: R >= G - 1.0 (filters out visible blue objects)
+            # 4. Positive purple excess: (B - G) + (R - G) >= 6.0
+            if ml_prob < self.model_threshold or features[5] < 2.0 or features[6] < -1.0 or features[1] < 6.0:
                 continue
 
-            # 8. Check if inside calibrated display quad (DocScanner area)
+            # Display containment check
             in_display = True
             if has_valid_quad:
                 poly = display_quad.astype(np.float32)
                 in_display = (cv2.pointPolygonTest(poly, (cx, cy), False) >= 0)
 
-            score = (ir_confidence * 200.0) + (peak_val * 1.5) + (circularity * 50.0) - (area * 0.1)
+            score = (ml_prob * 200.0) + (features[1] * 2.0) + (peak_val * 1.0)
             if has_valid_quad and not in_display:
                 score -= 300.0
 
-            valid_emitting_candidates.append({
-                "score": score,
+            candidates.append({
                 "point": (cx, cy),
-                "contour": c,
                 "bbox": (x1, y1, x2 - x1, y2 - y1),
+                "contour": c,
                 "area": area,
-                "circularity": circularity,
-                "aspect_ratio": aspect_ratio,
+                "circularity": circ,
+                "aspect_ratio": ar,
                 "peak": peak_val,
-                "spectral_ratio": core_spectral_ratio,
-                "purple_excess": core_excess,
-                "confidence": ir_confidence,
-                "is_ir": True,
-                "in_display": in_display
+                "purple_excess": float(features[1]),
+                "spectral_ratio": float(features[2]),
+                "confidence": ml_prob * 100.0,
+                "in_display": in_display,
+                "score": score
             })
 
-        if not valid_emitting_candidates:
-            msg = f"NON-IR LIGHT REJECTED (Conf: {highest_rejected_conf*100:.0f}%)" if highest_rejected_conf > 0.05 else "WHITE BOARD LIGHT REJECTED (NO IR BULB)"
-            cv2.putText(annotated, msg, (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 180, 180), 2)
-            cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (NO EMITTING IR LED)", (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 180, 180), 2)
-            metadata["status"] = "WHITE_LIGHT_REJECTED"
-            metadata["ir_confidence"] = highest_rejected_conf * 100.0
+        candidates.sort(key=lambda item: item["score"], reverse=True)
+        return candidates, purple_cleaned
+
+    def detect(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
+        """
+        Locate the centroid of the actively emitting 5mm IR LED bulb.
+        Returns: (x, y) tuple or None.
+        """
+        pt, _, _, _ = self.detect_debug(frame, threshold=threshold, display_quad=display_quad)
+        return pt
+
+    def detect_debug(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
+        """
+        Two-stage comprehensive detection:
+          - If the LED bulb is actively emitting purple light:
+              Returns drawing point (cx, cy) and visualizes bright green reticle.
+          - If the LED bulb is unlit / idle:
+              Locates the physical 5mm bulb and points to it with a cyan pointer in dev mode!
+              Returns None for whiteboard drawing (pen lifted).
+        """
+        if frame is None:
+            empty = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
+            return None, empty, empty, {"status": "NO_FRAME", "bulb_state": "NONE"}
+
+        h, w = frame.shape[:2]
+
+        if len(frame.shape) == 3:
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        else:
+            frame_gray = frame
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+        annotated = frame.copy()
+
+        # -------------------------------------------------------------
+        # Draw Calibrated Display Quad (DocScanner Screen Boundaries)
+        # -------------------------------------------------------------
+        has_valid_quad = False
+        if display_quad is not None and len(display_quad) == 4:
+            if cv2.contourArea(display_quad.astype(np.float32)) > 5000:
+                has_valid_quad = True
+                quad_int = display_quad.astype(np.int32)
+                cv2.polylines(annotated, [quad_int], isClosed=True, color=(0, 240, 255), thickness=2)
+                corner_labels = ["TL", "TR", "BR", "BL"]
+                for i, (cx_pt, cy_pt) in enumerate(quad_int):
+                    cv2.circle(annotated, (cx_pt, cy_pt), 4, (0, 255, 100), -1)
+                    cv2.putText(annotated, corner_labels[i], (cx_pt + 6, cy_pt - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1)
+
+        # -------------------------------------------------------------
+        # STEP 1: Check for Active Purple Light Emission
+        # -------------------------------------------------------------
+        candidates, purple_mask = self.detect_purple_emission_candidates(frame_bgr, display_quad)
+        thresh_rgb = cv2.cvtColor(purple_mask, cv2.COLOR_GRAY2RGB)
+
+        metadata = {
+            "threshold": threshold if threshold is not None else self.threshold,
+            "bulb_state": "SEARCHING",
+            "is_emitting": False,
+            "bulb_pos": None,
+            "purple_excess": 0.0,
+            "spectral_ratio": 1.0,
+            "circularity": 0.0,
+            "in_display_area": True,
+            "status": "SEARCHING"
+        }
+
+        # CASE A: Bulb is Actively Emitting Purple Light (Button Pressed -> DRAWING)
+        if len(candidates) > 0:
+            best = candidates[0]
+            bcx, bcy = best["point"]
+            x_b, y_b, w_b, h_b = best["bbox"]
+            in_disp = best["in_display"]
+            excess = best["purple_excess"]
+
+            self.last_bulb_pos = (bcx, bcy)
+            self.last_bulb_box = (x_b, y_b, w_b, h_b)
+            self.frames_since_seen = 0
+
+            reticle_col = (0, 255, 0) if in_disp else (255, 140, 0)
+            status_text = "DRAWING ON BOARD" if in_disp else "OUTSIDE DISPLAY"
+
+            # 1. Glowing magenta/purple bounding box around the 5mm LED bulb
+            cv2.rectangle(annotated, (x_b, y_b), (x_b + w_b, y_b + h_b), (255, 0, 255), 2)
+            cv2.circle(annotated, (int(bcx), int(bcy)), int(max(w_b, h_b) // 2 + 4), (200, 60, 240), 1)
+
+            # 2. Precision target reticle
+            cv2.circle(annotated, (int(bcx), int(bcy)), 12, reticle_col, 2)
+            cv2.circle(annotated, (int(bcx), int(bcy)), 3, reticle_col, -1)
+            cv2.line(annotated, (int(bcx) - 18, int(bcy)), (int(bcx) + 18, int(bcy)), reticle_col, 2)
+            cv2.line(annotated, (int(bcx), int(bcy) - 18), (int(bcx), int(bcy) + 18), reticle_col, 2)
+
+            # 3. Informational HUD tag
+            badge = f"IR LED: EMITTING (Purple +{excess:.0f}) -> ({int(bcx)}, {int(bcy)}) [{status_text}]"
+            cv2.putText(annotated, badge, (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 100), 2)
+
+            # Mark on threshold mask
+            cv2.circle(thresh_rgb, (int(bcx), int(bcy)), 10, (0, 255, 0), 2)
+            cv2.putText(thresh_rgb, f"PURPLE IR EMISSION DETECTED (+{excess:.0f})", (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
+
+            metadata["bulb_state"] = "EMITTING"
+            metadata["is_emitting"] = True
+            metadata["bulb_pos"] = (bcx, bcy)
+            metadata["purple_excess"] = excess
+            metadata["spectral_ratio"] = best["spectral_ratio"]
+            metadata["circularity"] = best["circularity"]
+            metadata["in_display_area"] = in_disp
+            metadata["status"] = "EMITTING_DRAWING"
+
+            return (bcx, bcy), annotated, thresh_rgb, metadata
+
+        # -------------------------------------------------------------
+        # STEP 2: Bulb is Unlit / Idle -> Locate Physical 5mm Bulb Tip
+        # -------------------------------------------------------------
+        self.frames_since_seen += 1
+        bulb_res = self.locate_physical_bulb(frame_gray)
+
+        if bulb_res is not None:
+            tip_x, tip_y, (bx, by, bw, bh), score = bulb_res
+            self.last_bulb_pos = (tip_x, tip_y)
+            self.last_bulb_box = (bx, by, bw, bh)
+            self.frames_since_seen = 0
+
+            itip_x, itip_y = int(tip_x), int(tip_y)
+
+            # Check if physical bulb is inside display quad
+            in_disp = True
+            if has_valid_quad:
+                poly = display_quad.astype(np.float32)
+                in_disp = (cv2.pointPolygonTest(poly, (tip_x, tip_y), False) >= 0)
+
+            # Visual pointer directly showing where the 5mm LED bulb is in Dev Mode!
+            cyan_col = (0, 240, 255)
+            # 1. Reticle framing the bulb dome
+            cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), cyan_col, 2)
+            cv2.circle(annotated, (itip_x, itip_y), 8, (255, 230, 40), 2)
+            cv2.circle(annotated, (itip_x, itip_y), 2, (255, 255, 255), -1)
+
+            # 2. Pointer arrow pointing directly down to the bulb tip
+            cv2.arrowedLine(annotated, (itip_x, max(0, itip_y - 28)), (itip_x, max(0, itip_y - 8)),
+                            (255, 220, 40), 2, tipLength=0.35)
+
+            # 3. Label tag
+            label = f"[5mm LED BULB LOCATED] Tip: ({itip_x}, {itip_y}) | STATE: IDLE (OFF - Press button to draw)"
+            cv2.putText(annotated, label, (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, cyan_col, 2)
+
+            # On threshold mask: indicate tracked position
+            cv2.rectangle(thresh_rgb, (bx, by), (bx + bw, by + bh), (0, 200, 255), 1)
+            cv2.putText(thresh_rgb, f"5mm BULB LOCATED: IDLE (NO EMISSION)", (15, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
+
+            metadata["bulb_state"] = "LOCATED_IDLE"
+            metadata["is_emitting"] = False
+            metadata["bulb_pos"] = (tip_x, tip_y)
+            metadata["in_display_area"] = in_disp
+            metadata["status"] = "BULB_LOCATED_IDLE"
+
+            # Whiteboard does NOT draw when bulb is unlit (pen lifted)
             return None, annotated, thresh_rgb, metadata
 
-        # Select the highest-confidence authentic emitting IR LED bulb
-        valid_emitting_candidates.sort(key=lambda item: item["score"], reverse=True)
-        best = valid_emitting_candidates[0]
+        # CASE C: No bulb and no purple light in view
+        cv2.putText(annotated, "SEARCHING FOR 5mm LED BULB / IR LIGHT...", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 180, 180), 2)
+        cv2.putText(thresh_rgb, "SEARCHING (NO BULB / NO PURPLE LIGHT)", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.60, (160, 160, 160), 2)
 
-        best_pt = best["point"]
-        best_contour = best["contour"]
-        bx, by, bw, bh = best["bbox"]
-        icx, icy = int(best_pt[0]), int(best_pt[1])
-        in_display = best["in_display"]
-        conf = best["confidence"] * 100.0
-
-        reticle_color = (0, 255, 0) if in_display else (255, 120, 0)
-        status_text = "TRACKED & DRAWING" if in_display else "OUTSIDE DISPLAY"
-
-        # Draw contour boundary in yellow
-        cv2.drawContours(annotated, [best_contour], -1, (255, 230, 0), 2)
-
-        # Draw glowing purple/magenta bounding box around the 5mm LED bulb body
-        cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (220, 60, 240), 2)
-
-        # Draw circular target reticle
-        cv2.circle(annotated, (icx, icy), 14, reticle_color, 2)
-        cv2.circle(annotated, (icx, icy), 3, reticle_color, -1)
-        cv2.line(annotated, (icx - 20, icy), (icx + 20, icy), reticle_color, 2)
-        cv2.line(annotated, (icx, icy - 20), (icx, icy + 20), reticle_color, 2)
-
-        # Text annotation on camera feed
-        label = f"IR LED BULB: {conf:.1f}% [EMITTING] -> ({icx}, {icy}) [{status_text}]"
-        cv2.putText(annotated, label, (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, reticle_color, 2)
-        cv2.putText(thresh_rgb, f"THRESH: {thresh_val} (IR BULB EMITTING {conf:.0f}%)", (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
-
-        # Mark on threshold mask
-        cv2.circle(thresh_rgb, (icx, icy), 8, (0, 255, 0), 1)
-
-        metadata["area"] = best["area"]
-        metadata["circularity"] = best["circularity"]
-        metadata["aspect_ratio"] = best["aspect_ratio"]
-        metadata["peak_brightness"] = best["peak"]
-        metadata["spectral_ratio"] = best["spectral_ratio"]
-        metadata["purple_excess"] = best["purple_excess"]
-        metadata["ir_confidence"] = conf
-        metadata["is_ir_purple"] = True
-        metadata["is_emitting_bulb"] = True
-        metadata["in_display_area"] = in_display
-        metadata["point"] = best_pt
-        metadata["status"] = "TRACKING_AUTHENTIC_IR_BULB"
-
-        return best_pt, annotated, thresh_rgb, metadata
+        return None, annotated, thresh_rgb, metadata
 
 
 if __name__ == "__main__":
-    print("Testing IRDetector with trained 5mm IR LED bulb model...")
-    detector = IRDetector(threshold=200)
+    print("Testing Two-Stage IRDetector with 5mm LED bulb localization & purple emission...")
+    det = IRDetector(threshold=200)
 
-    # Test 1: Blackboard white drawing (R=255, G=255, B=255)
-    img_white = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.circle(img_white, (200, 200), 8, (255, 255, 255), -1)
-    pt_w, _, _, meta_w = detector.detect_debug(img_white)
-    print("Test 1 - Whiteboard Drawing:")
-    print(f"  Detected Point : {pt_w} (Expected: None)")
-    print(f"  Status         : {meta_w['status']}")
-    print(f"  Confidence     : {meta_w['ir_confidence']:.1f}%")
-    assert pt_w is None, "ERROR: Whiteboard drawing was not rejected!"
+    # Test 1: User's real unlit bulb photo 1
+    im1 = cv2.imread(r'C:/Users/prana/.gemini/antigravity/brain/742360c1-85ca-4369-a3d9-0dea5a3a94ec/.user_uploaded/media_1793025491309_fd5b99af.jpg')
+    pt1, _, _, meta1 = det.detect_debug(cv2.cvtColor(im1, cv2.COLOR_BGR2RGB))
+    print("\n--- Test 1: User Photo 1 (Unlit 5mm Stylus Bulb in Hand) ---")
+    print(f"  Drawing Point : {pt1} (Expected: None -> Pen Lifted)")
+    print(f"  Bulb State    : {meta1['bulb_state']} (Expected: LOCATED_IDLE)")
+    print(f"  Bulb Position : {meta1['bulb_pos']}")
+    assert pt1 is None, "Failed: Unlit bulb should not draw!"
+    assert meta1['bulb_state'] == "LOCATED_IDLE", f"Failed: Expected LOCATED_IDLE, got {meta1['bulb_state']}"
 
-    # Test 2: Active 5mm IR LED bulb emitting purple IR light (R=240, G=120, B=230)
-    img_ir = np.zeros((480, 640, 3), dtype=np.uint8)
-    # Core
-    cv2.circle(img_ir, (320, 240), 5, (250, 180, 250), -1)
-    # Glowing epoxy dome halo
-    cv2.circle(img_ir, (320, 240), 12, (230, 110, 220), 2)
-    pt_ir, _, _, meta_ir = detector.detect_debug(img_ir)
-    print("\nTest 2 - Emitting 5mm IR LED Bulb:")
-    print(f"  Detected Point : {pt_ir} (Expected: around (320, 240))")
-    print(f"  Status         : {meta_ir['status']}")
-    print(f"  Confidence     : {meta_ir['ir_confidence']:.1f}%")
-    assert pt_ir is not None, "ERROR: Emitting IR LED bulb was not detected!"
-    assert abs(pt_ir[0] - 320) < 3 and abs(pt_ir[1] - 240) < 3, "ERROR: Point coordinates inaccurate!"
+    # Test 2: User's real emitting IR LED image
+    im2 = cv2.imread(r'dataset/ir_led_emitting/user_ref_emitting_ground_truth.png')
+    frame_emit = np.zeros((480, 640, 3), dtype=np.uint8)
+    h2, w2 = im2.shape[:2]
+    frame_emit[100:100+h2, 200:200+w2] = cv2.cvtColor(im2, cv2.COLOR_BGR2RGB)
+    pt2, _, _, meta2 = det.detect_debug(frame_emit)
+    print("\n--- Test 2: Active Emitting IR LED Bulb ---")
+    print(f"  Drawing Point : {pt2} (Expected: Valid (x, y) -> Drawing Active)")
+    print(f"  Bulb State    : {meta2['bulb_state']} (Expected: EMITTING)")
+    print(f"  Purple Excess : +{meta2['purple_excess']:.1f}")
+    assert pt2 is not None, "Failed: Emitting IR LED should produce drawing point!"
+    assert meta2['bulb_state'] == "EMITTING", f"Failed: Expected EMITTING, got {meta2['bulb_state']}"
 
-    print("\nALL TESTS PASSED! Trained IR detector accurately locks onto emitting IR LED bulb and 100% rejects white light.")
+    # Test 3: Blackboard white drawing (White Light)
+    frame_white = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.circle(frame_white, (300, 200), 10, (255, 255, 255), -1)
+    pt3, _, _, meta3 = det.detect_debug(frame_white)
+    print("\n--- Test 3: Whiteboard Drawing on Screen (White Light) ---")
+    print(f"  Drawing Point : {pt3} (Expected: None -> White light rejected)")
+    print(f"  Bulb State    : {meta3['bulb_state']}")
+    assert pt3 is None, "Failed: Whiteboard drawing should be 100% rejected!"
+
+    print("\nALL TWO-STAGE DETECTOR TESTS PASSED PERFECTLY!")

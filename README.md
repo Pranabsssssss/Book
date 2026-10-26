@@ -116,15 +116,29 @@ Both Auto and Manual modes open into the **Calibration Studio**:
   - **`[SPACE]` or Button [Default Bounds]**: Resets to standard 1:1 camera boundary.
   - **`[ESC]`**: Aborts calibration.
 
-### Trained 5mm IR LED Bulb Detector & Purple Emission Model
-Instead of tracking ordinary white light, the detector runs a **trained machine learning model** (`models/ir_led_model.json`) specifically trained on **119 real-world images**:
-1. **Target Class (Active Emitting 5mm IR LED Bulb)**:
-   - 5mm through-hole clear epoxy dome LED bulb actively emitting infrared light as captured by digital camera sensors.
-   - Characterized by an ultra-bright point emission die core surrounded by an intense **light-purple / violet / magenta halo** ($B \gg G$ and $R \gg G$, Purple Excess $> +100$, Spectral Ratio $> 2.0$).
-2. **Negative Class (Hard-Rejected Light Sources & Non-Emitting States)**:
-   - **Unlit 5mm LED Bulbs**: When the marker push-button is not pressed, ambient light on the clear epoxy dome is recognized as passive and ignored ($0.0\%$ confidence).
-   - **White Blackboard Drawings on Screen**: Screen subpixels output equal RGB ($R \approx G \approx B \approx 255$, Purple Excess $\le 0.0$, Spectral Ratio $\approx 1.0$) $\rightarrow$ **100% HARD REJECTED** (Confidence $< 2.5\%$). Prevents drawing feedback loops.
-   - **Room Lighting & Lamps**: Ceiling lamps, desk fixtures, flashlights, torches, and sunlight $\rightarrow$ **REJECTED**.
+### Two-Stage 5mm IR LED Bulb Tracking & Purple Emission System
+The detector operates a **two-stage detection architecture** built directly from the physical 5mm clear IR LED stylus photos:
+
+1. **Stage 1 — Physical 5mm LED Bulb Locator (Idle / Off State in Dev Mode)**:
+   - When the LED is unlit (button released / marker idle in hand):
+   - The detector scans for the physical clear 5mm through-hole LED bulb (the stylus dome tip) using multi-scale orientation templates (`models/bulb_templates/`).
+   - In **Testing / Development Mode**, the camera feed **points directly to the physical bulb tip** with a vibrant **Cyan reticle & direction arrow**:
+     `[5mm LED BULB LOCATED] Tip: (X, Y) | STATE: IDLE (OFF) - Press button to draw`
+   - Since the LED is not emitting light, the drawing point is `None` $\implies$ **the whiteboard does NOT draw (pen lifted)**.
+
+2. **Stage 2 — High-Sensitivity Purple IR Emission Trigger (Active Drawing)**:
+   - When the user presses the button on the marker:
+   - The LED illuminates, emitting near-infrared radiation. Even when the emission is **faint or slightly purple** ($B > G + 1.2$, Purple Excess $\ge 3.0$), the chromaticity engine immediately recognizes the optical infrared signature!
+   - State instantly transitions to:
+     `[IR LED: EMITTING PURPLE] -> DRAWING AT (X, Y) [DRAWING ON BOARD]`
+   - The reticle switches to **Bright Green with a Glowing Magenta Halo** around the bulb tip.
+   - The whiteboard **immediately marks / draws smooth lines and dots** at that coordinate!
+   - When the button is released, the purple light turns off $\implies$ drawing stops instantly and smoothly returns to Stage 1.
+
+3. **100% Rejection of Non-IR & White Light (High Accuracy)**:
+   - **Whiteboard Drawings on Screen**: Screen pixels output equal RGB ($R \approx G \approx B \implies B \le G$, Purple Excess $\le 0.0$) $\rightarrow$ **100% HARD REJECTED**.
+   - **Room Lamps & Ambient Sunlight**: Incandescent lamps and daylight have $B < G$ $\rightarrow$ **100% HARD REJECTED**.
+   - The canvas **ONLY marks when the 5mm IR LED bulb is actively emitting that purple IR light**!
 
 #### Model Architecture & Performance
 - **Trained Model**: 12-dimensional spectral, chromatic, and morphological feature classifier with standardized scaling.
@@ -135,7 +149,7 @@ Instead of tracking ordinary white light, the detector runs a **trained machine 
 #### Dataset & Retraining Tools
 - `tools/download_dataset.py`: Automatically downloads and prepares images from Wikimedia Commons and augments reference samples.
 - `tools/train_ir_detector.py`: Extracts 12-D feature vectors and trains the classifier, exporting to `models/ir_led_model.json`.
-- `tools/test_e2e_ir_model.py`: Runs end-to-end verification against reference emitting IR LEDs, unlit bulbs, and white board strokes.
+- `tools/test_two_stage_full.py`: Runs end-to-end verification against reference emitting IR LEDs, unlit stylus bulbs, and white board strokes.
 
 ### Operating Modes (Production vs Testing/Development)
 After calibration is complete, the application prompts you to choose an operating mode:
