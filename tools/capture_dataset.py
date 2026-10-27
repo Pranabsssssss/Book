@@ -14,14 +14,12 @@ from camera import Camera, normalize_backend
 from config import CAMERA_BACKEND, CAMERA_DEVICE_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, IR_PURPLE_EXCESS_THRESHOLD
 
 DATASET_DIR = BASE_DIR / "dataset"
-CAPTURED_BACKUP_DIR = BASE_DIR / "dataset_captured"
 
 CATEGORIES = {
     1: {
         "key": "ir_led_emitting",
         "name": "IR LED EMITTING (Bulb On / Purple Glow)",
         "dir": DATASET_DIR / "ir_led_emitting",
-        "backup_dir": CAPTURED_BACKUP_DIR / "ir_led_emitting",
         "color": (255, 0, 255),  # Magenta
         "rec_count": 450,
         "instructions": "Hold marker with push-button PRESSED. Move around at different distances & angles."
@@ -30,7 +28,6 @@ CATEGORIES = {
         "key": "ir_bulb_off",
         "name": "UNLIT 5mm LED BULB (Bulb Off / Stylus Idle)",
         "dir": DATASET_DIR / "ir_bulb_off",
-        "backup_dir": CAPTURED_BACKUP_DIR / "ir_bulb_off",
         "color": (0, 240, 255),  # Cyan
         "rec_count": 300,
         "instructions": "Hold marker UNLIT (button released). Point stylus tip at camera in various directions."
@@ -39,7 +36,6 @@ CATEGORIES = {
         "key": "other_lights",
         "name": "BACKGROUND / WHITE LIGHT (Screen, Lamps, Hands)",
         "dir": DATASET_DIR / "other_lights",
-        "backup_dir": CAPTURED_BACKUP_DIR / "other_lights",
         "color": (0, 200, 100),  # Green
         "rec_count": 250,
         "instructions": "Aim camera at whiteboard screen, monitor white drawings, room lamps, daylight, hands."
@@ -150,7 +146,7 @@ def main():
     print("=" * 65)
     print(f"Target Total Images : {args.target}")
     print(f"Camera Backend      : {args.camera} (device index: {args.device})")
-    print("Output Folders      : dataset/ (and backup in dataset_captured/)")
+    print("Output Folders      : dataset/")
     print("-" * 65)
     print("Controls:")
     print("  [1]     Switch to IR LED EMITTING (marker button pressed / purple light)")
@@ -165,7 +161,6 @@ def main():
     # Ensure output directories exist
     for cat in CATEGORIES.values():
         cat["dir"].mkdir(parents=True, exist_ok=True)
-        cat["backup_dir"].mkdir(parents=True, exist_ok=True)
 
     # Count existing images in each category
     counts = {
@@ -251,11 +246,9 @@ def main():
                 img_name = f"user_cam_{cat['key']}_{counts[active_cat_idx] + 1:04d}_{ts}.png"
 
                 save_path_1 = cat["dir"] / img_name
-                save_path_2 = cat["backup_dir"] / img_name
 
                 # Save uncompressed/lossless PNG
                 cv2.imwrite(str(save_path_1), frame_bgr)
-                cv2.imwrite(str(save_path_2), frame_bgr)
 
                 counts[active_cat_idx] += 1
                 session_captured += 1
@@ -291,7 +284,7 @@ def main():
     print(f"      [1] IR LED Emitting       : {counts[1]} images")
     print(f"      [2] Unlit 5mm Stylus Bulb : {counts[2]} images")
     print(f"      [3] Other Lights / Screen : {counts[3]} images")
-    print(f"  - Saved to folders            : dataset/ and dataset_captured/")
+    print(f"  - Saved to folders            : dataset/")
     print("=" * 65)
 
     if session_captured > 0:

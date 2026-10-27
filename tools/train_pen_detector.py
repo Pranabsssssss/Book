@@ -52,7 +52,6 @@ MODELS_DIR = BASE_DIR / "models"
 BULB_TMPL_DIR = MODELS_DIR / "bulb_templates"
 PEN_MODEL_FILE = MODELS_DIR / "pen_model.json"
 DATASET_DIR = BASE_DIR / "dataset"
-DATASET_CAPTURED_DIR = BASE_DIR / "dataset_captured"
 
 
 def parse_args():
@@ -297,7 +296,7 @@ class PenModelTrainer:
         return True
 
     def train_from_dataset(self):
-        """Mines existing dataset images in dataset_captured/ to train the pen model."""
+        """Mines existing dataset images in dataset/ to train the pen model."""
         print("=" * 60)
         print("SMART NOTEBOOK — TRAINING PEN MODEL FROM DATASET")
         print("=" * 60)
@@ -314,7 +313,7 @@ class PenModelTrainer:
                     loaded_refs.append(im)
 
         # 2. Mine unlit bulb frames
-        unlit_dir = DATASET_CAPTURED_DIR / "ir_bulb_off"
+        unlit_dir = DATASET_DIR / "ir_bulb_off"
         if unlit_dir.exists():
             files = list(unlit_dir.glob("*.png"))[:60]
             print(f"[Dataset] Loading {len(files)} unlit pen camera frames...")
@@ -328,7 +327,7 @@ class PenModelTrainer:
                     self.samples_bg.append(im[20:70, w//2-25:w//2+25])
 
         # 3. Mine emitting bulb frames
-        emit_dir = DATASET_CAPTURED_DIR / "ir_led_emitting"
+        emit_dir = DATASET_DIR / "ir_led_emitting"
         if emit_dir.exists():
             e_files = list(emit_dir.glob("*.png"))[:60]
             print(f"[Dataset] Loading {len(e_files)} emitting pen camera frames...")

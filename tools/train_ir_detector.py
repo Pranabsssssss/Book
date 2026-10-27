@@ -156,18 +156,15 @@ def build_and_train():
     y_list = []
     names = []
 
-    # Directories to search (both core dataset and captured camera dataset)
-    captured_dir = BASE_DIR / "dataset_captured"
-
     def collect_files(cat_name):
         seen = set()
         out = []
-        for parent in [DATASET_DIR / cat_name, captured_dir / cat_name]:
-            if parent.exists():
-                for f in list(parent.glob("*.jpg")) + list(parent.glob("*.png")):
-                    if f.name not in seen:
-                        seen.add(f.name)
-                        out.append(f)
+        parent = DATASET_DIR / cat_name
+        if parent.exists():
+            for f in list(parent.glob("*.jpg")) + list(parent.glob("*.png")):
+                if f.name not in seen:
+                    seen.add(f.name)
+                    out.append(f)
         return out
 
     # Positive: Active IR LED bulb emitting purple IR light
