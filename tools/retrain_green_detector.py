@@ -406,6 +406,10 @@ class GreenRetrainStudio:
         h, w = frame_bgr.shape[:2]
         hud = frame_bgr.copy()
 
+        # Ensure test canvas matches active camera frame dimensions
+        if self.test_canvas.shape[:2] != (h, w):
+            self.test_canvas = np.zeros((h, w, 3), dtype=np.uint8)
+
         # Update test canvas
         if is_green_on and pt is not None:
             # Drawing active
@@ -426,9 +430,11 @@ class GreenRetrainStudio:
             action_tag = "UNLIT / IDLE -> PEN LIFTED (NO DRAWING)"
             action_col = (180, 180, 180)
 
-        # Blend drawing canvas onto camera feed (semi-transparent drawing overlay)
-        mask = cv2.cvtColor(self.test_canvas, cv2.COLOR_BGR2GRAY) > 10
-        hud[mask] = cv2.addWeighted(hud[mask], 0.25, self.test_canvas[mask], 0.75, 0)
+        # Overlay bright drawing strokes onto camera feed
+        canvas_gray = cv2.cvtColor(self.test_canvas, cv2.COLOR_BGR2GRAY)
+        mask = canvas_gray > 10
+        if np.any(mask):
+            hud[mask] = self.test_canvas[mask]
 
         # Header instructions
         self.draw_banner(

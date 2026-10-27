@@ -97,7 +97,7 @@ LED_TYPE = "green"
 # Green LEDs emit at ~520-530nm. When active, the camera sensor records high Green (G)
 # with suppressed Red (R) and Blue (B).
 # Green Excess = (G - R) + (G - B). White light has G ≈ R ≈ B (excess ≈ 0), room lamps have R > G (excess < 0).
-GREEN_EXCESS_THRESHOLD = 15.0      # Empirical threshold (> 15.0 = Green LED emission guaranteed)
+GREEN_EXCESS_THRESHOLD = 24.0      # Empirical threshold (> 15.0 = Green LED emission guaranteed)
 GREEN_SPECTRAL_RATIO_MIN = 1.15    # 2*G / (max(1.0, R + B))
 GREEN_THRESHOLD = 110              # Brightness threshold for green light
 
