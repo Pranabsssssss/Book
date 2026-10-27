@@ -498,6 +498,30 @@ class PenModelTrainer:
             tip_x = float(bx + bw // 2)
             tip_y = float(by + 4)
 
+            # Localized bulb patch check: has it turned purplish bright compared to baseline?
+            itip_x, itip_y = int(tip_x), int(tip_y)
+            r = 14
+            patch = frame_bgr[max(0, itip_y - r):min(h, itip_y + r), max(0, itip_x - r):min(w, itip_x + r)]
+            if patch.size > 0:
+                p_b = patch[:, :, 0].astype(np.float32)
+                p_g = patch[:, :, 1].astype(np.float32)
+                p_r = patch[:, :, 2].astype(np.float32)
+                p_gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+                p_excess_map = (p_b - p_g) + np.maximum(0.0, p_r - p_g)
+                tip_excess = float(np.max(p_excess_map))
+                tip_peak = float(np.max(p_gray))
+                mean_b = float(np.mean(p_b))
+                mean_g = float(np.mean(p_g))
+
+                if (tip_excess >= 8.0 or (mean_b > mean_g + 2.0 and tip_peak >= 110.0)):
+                    return {
+                        "state": "IR_EMITTING",
+                        "point": (tip_x, tip_y),
+                        "confidence": float(best_score),
+                        "purple_excess": tip_excess,
+                        "annotated": annotated
+                    }
+
             # Shaft verification: verify pen cylinder extends backwards from the tip
             pen_shaft_box_y2 = min(h, by + bh + 45)
             shaft_crop = gray[by:pen_shaft_box_y2, max(0, bx - 10):min(w, bx + bw + 10)]

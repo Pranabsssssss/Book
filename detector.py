@@ -74,12 +74,14 @@ class IRDetector:
 
         # Load trained Pen In Hand model if available
         self.pen_model_data = None
-        self.pen_threshold = 0.82
+        self.pen_threshold = 0.84
+        self.bulb_baseline_excess = 0.0
+        self.bulb_baseline_bright = 100.0
         if os.path.exists(PEN_MODEL_FILE):
             try:
                 with open(PEN_MODEL_FILE, "r", encoding="utf-8") as f:
                     self.pen_model_data = json.load(f)
-                self.pen_threshold = float(self.pen_model_data.get("correlation_threshold", 0.82))
+                self.pen_threshold = float(self.pen_model_data.get("correlation_threshold", 0.84))
                 print(f"[IRDetector] Loaded trained Pen-In-Hand model from: {PEN_MODEL_FILE} (threshold={self.pen_threshold:.2f})")
             except Exception as e:
                 print(f"[IRDetector] Warning: Could not load pen model: {e}")
@@ -88,16 +90,27 @@ class IRDetector:
         """Load orientation templates of the 5mm LED bulb, prioritizing exact user templates and trained pen tip exemplars."""
         tmpl_dir = Path(BASE_DIR) / "models" / "bulb_templates"
         if tmpl_dir.exists():
-            priority = ["user_tip_up.png", "user_tip_down.png"]
+            priority = [
+                "user_tip_up.png",
+                "user_stylus_rot_27_a0_s114.png",
+                "user_stylus_tip_cam_scale.png",
+                "user_tip_down.png",
+                "user_stylus_base32.png",
+                "user_stylus_rot_03_a0_s85.png",
+                "user_stylus_rot_15_a0_s100.png",
+                "user_stylus_rot_24_a-45_s114.png",
+                "user_stylus_rot_28_a15_s114.png"
+            ]
+            priority.extend([f"user_stylus_rot_{i:02d}*.png" for i in range(36)])
             priority.extend([f"pen_tip_trained_{i:02d}.png" for i in range(12)])
             loaded = set()
-            for p_name in priority:
-                p = tmpl_dir / p_name
-                if p.exists():
-                    im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                    if im is not None:
-                        self.bulb_templates.append(im)
-                        loaded.add(p.name)
+            for p_pattern in priority:
+                for p in tmpl_dir.glob(p_pattern) if "*" in p_pattern else [tmpl_dir / p_pattern]:
+                    if p.exists() and p.name not in loaded:
+                        im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                        if im is not None:
+                            self.bulb_templates.append(im)
+                            loaded.add(p.name)
 
             for p in tmpl_dir.glob("*.png"):
                 if p.name not in loaded:
@@ -106,6 +119,64 @@ class IRDetector:
                         self.bulb_templates.append(im)
                         loaded.add(p.name)
         print(f"[IRDetector] Loaded {len(self.bulb_templates)} 5mm LED bulb templates for physical tracking.")
+
+    def check_bulb_emission_at_point(self, frame_bgr: np.ndarray, tip_x: float, tip_y: float) -> tuple:
+        """
+        Samples a localized patch around the tracked physical bulb tip and compares it
+        with previous images/baseline to detect if it has become 'a little purplish bright'.
+        Returns: (is_emitting, purple_excess, peak_brightness, info_str)
+        """
+        if frame_bgr is None or frame_bgr.size == 0:
+            return False, 0.0, 0.0, "NO_FRAME"
+
+        h, w = frame_bgr.shape[:2]
+        itip_x, itip_y = int(tip_x), int(tip_y)
+        r = 14
+        x1 = max(0, itip_x - r)
+        y1 = max(0, itip_y - r)
+        x2 = min(w, itip_x + r)
+        y2 = min(h, itip_y + r)
+
+        patch = frame_bgr[y1:y2, x1:x2]
+        if patch.size == 0:
+            return False, 0.0, 0.0, "EMPTY_PATCH"
+
+        b = patch[:, :, 0].astype(np.float32)
+        g = patch[:, :, 1].astype(np.float32)
+        r_ch = patch[:, :, 2].astype(np.float32)
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+
+        peak_bright = float(np.max(gray))
+        mean_b = float(np.mean(b))
+        mean_g = float(np.mean(g))
+        mean_r = float(np.mean(r_ch))
+
+        # Pixel-wise purple excess
+        bg_diff = b - g
+        rg_diff = r_ch - g
+        excess_map = bg_diff + np.maximum(0.0, rg_diff)
+        max_excess = float(np.max(excess_map))
+
+        # Check conditions:
+        # Condition A: Absolute purple excess meter >= 8.0 (canonical threshold)
+        cond_abs = (max_excess >= 8.0) and (mean_b > mean_g + 3.0) and (mean_r > mean_g + 2.0) and (peak_bright >= 110.0)
+
+        # Condition B: Temporal delta above baseline ('compare with previous images')
+        delta_excess = max_excess - getattr(self, "bulb_baseline_excess", 0.0)
+        delta_bright = peak_bright - getattr(self, "bulb_baseline_bright", 100.0)
+        cond_temporal = (delta_excess >= 5.0) and (mean_b > mean_g + 2.0) and (delta_bright >= 10.0) and (peak_bright >= 105.0)
+
+        is_emitting = cond_abs or cond_temporal
+
+        if is_emitting:
+            info = f"EMITTING: +{max_excess:.1f} (Delta: +{delta_excess:.1f}, Peak: {peak_bright:.0f})"
+        else:
+            info = f"UNLIT: +{max_excess:.1f}"
+            # Update rolling baseline when unlit
+            self.bulb_baseline_excess = 0.90 * getattr(self, "bulb_baseline_excess", 0.0) + 0.10 * max_excess
+            self.bulb_baseline_bright = 0.90 * getattr(self, "bulb_baseline_bright", 100.0) + 0.10 * peak_bright
+
+        return is_emitting, max_excess, peak_bright, info
 
     def locate_physical_bulb(self, frame_gray: np.ndarray) -> tuple:
         """
@@ -117,8 +188,8 @@ class IRDetector:
             return None
 
         h, w = frame_gray.shape[:2]
-        min_thresh = getattr(self, "pen_threshold", 0.82)
-        min_thresh = max(0.82, min_thresh)
+        min_thresh = min(0.84, getattr(self, "pen_threshold", 0.84))
+        min_thresh = max(0.80, min_thresh)
 
         # 1. Fast Local Window Search (if recently tracked and stable)
         if self.last_bulb_pos is not None and self.frames_since_seen < 6:
@@ -134,7 +205,7 @@ class IRDetector:
                 best_local_score = -1.0
                 best_local_loc = None
                 best_local_sz = (0, 0)
-                for tmpl in self.bulb_templates[:6]:
+                for tmpl in self.bulb_templates[:12]:
                     if tmpl.shape[0] < crop.shape[0] and tmpl.shape[1] < crop.shape[1]:
                         res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
                         _, max_v, _, max_l = cv2.minMaxLoc(res)
@@ -158,7 +229,7 @@ class IRDetector:
         best_size = (0, 0)
 
         # Evaluate priority templates across angles at native resolution
-        for tmpl in self.bulb_templates[:6]:
+        for tmpl in self.bulb_templates[:16]:
             tw, th = tmpl.shape[1], tmpl.shape[0]
             if tw >= w or th >= h:
                 continue
@@ -176,7 +247,6 @@ class IRDetector:
             bw, bh = best_size
             tip_x = float(bx + bw // 2)
             tip_y = float(by + 4)
-            return (tip_x, tip_y, (bx, by, bw, bh), best_score)
             return (tip_x, tip_y, (bx, by, bw, bh), best_score)
 
         return None
@@ -503,6 +573,38 @@ class IRDetector:
             if has_valid_quad:
                 poly = display_quad.astype(np.float32)
                 in_disp = (cv2.pointPolygonTest(poly, (tip_x, tip_y), False) >= 0)
+
+            # Temporal Chromaticity Comparison with previous images at tracked bulb tip
+            is_emit, tip_excess, peak, info = self.check_bulb_emission_at_point(frame_bgr, tip_x, tip_y)
+
+            if is_emit:
+                # The tracked bulb just turned purplish bright! Trigger DRAWING!
+                reticle_col = (0, 255, 0) if in_disp else (255, 140, 0)
+                status_text = "DRAWING ON BOARD" if in_disp else "OUTSIDE DISPLAY"
+
+                # Glowing magenta/green reticle around the bulb tip
+                cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (255, 0, 255), 2)
+                cv2.circle(annotated, (itip_x, itip_y), 12, reticle_col, 2)
+                cv2.circle(annotated, (itip_x, itip_y), 3, reticle_col, -1)
+                cv2.line(annotated, (itip_x - 18, itip_y), (itip_x + 18, itip_y), reticle_col, 2)
+                cv2.line(annotated, (itip_x, itip_y - 18), (itip_x, itip_y + 18), reticle_col, 2)
+
+                badge = f"IR LED: EMITTING ({info}) -> ({itip_x}, {itip_y}) [{status_text}]"
+                cv2.putText(annotated, badge, (15, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 100), 2)
+
+                cv2.circle(thresh_rgb, (itip_x, itip_y), 10, (0, 255, 0), 2)
+                cv2.putText(thresh_rgb, f"PURPLE IR DETECTED: +{tip_excess:.1f} (THRESHOLD > 8.0)", (15, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
+
+                metadata["bulb_state"] = "EMITTING"
+                metadata["is_emitting"] = True
+                metadata["bulb_pos"] = (tip_x, tip_y)
+                metadata["purple_excess"] = tip_excess
+                metadata["in_display_area"] = in_disp
+                metadata["status"] = "EMITTING_DRAWING"
+
+                return (tip_x, tip_y), annotated, thresh_rgb, metadata
 
             # Visual pointer directly showing where the 5mm LED bulb is in Dev Mode!
             cyan_col = (0, 240, 255)
