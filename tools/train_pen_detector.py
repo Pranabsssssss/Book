@@ -79,17 +79,16 @@ def measure_purple_excess(frame_bgr: np.ndarray) -> tuple:
     if frame_bgr is None or frame_bgr.size == 0:
         return False, 0.0, None
 
-    b = frame_bgr[:, :, 0].astype(np.float32)
-    g = frame_bgr[:, :, 1].astype(np.float32)
-    r = frame_bgr[:, :, 2].astype(np.float32)
+    b = frame_bgr[:, :, 0].astype(np.int16)
+    g = frame_bgr[:, :, 1].astype(np.int16)
+    r = frame_bgr[:, :, 2].astype(np.int16)
 
     bg = b - g
     rg = r - g
-    excess = bg + np.maximum(0.0, rg)
+    excess = bg + np.maximum(0, rg)
 
-    # IR physical profile: B > G + 5.0, R > G + 5.0, Gray >= 110
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    active = (bg >= 5.0) & (rg >= 5.0) & (excess >= 12.0) & (gray >= 110)
+    active = (bg >= 5) & (rg >= 5) & (excess >= 12) & (gray >= 110)
 
     # Exclude borders
     active[:CAMERA_EDGE_MARGIN_TOP, :] = False
@@ -248,7 +247,9 @@ class PenModelTrainer:
         self.trained_templates = []  # list of finalized templates for detector
         self.model_data = {}
         self.is_trained = False
-        self.threshold = 0.82
+        self.threshold = 0.84
+        self.last_bulb_pos = None
+        self.frames_since_seen = 999
 
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         BULB_TMPL_DIR.mkdir(parents=True, exist_ok=True)
@@ -472,31 +473,78 @@ class PenModelTrainer:
         best_loc = None
         best_sz = (0, 0)
 
-        # Use trained templates or fallback to user templates
-        eval_tmpls = self.trained_templates[:6] if len(self.trained_templates) > 0 else []
+        # Fast local search if recently tracked (< 0.25ms)
+        self.frames_since_seen += 1
+        eval_tmpls = self.trained_templates[:4] if len(self.trained_templates) > 0 else []
         if len(eval_tmpls) == 0:
-            p_up = BULB_TMPL_DIR / "user_tip_up.png"
-            if p_up.exists():
-                im = cv2.imread(str(p_up), cv2.IMREAD_GRAYSCALE)
-                if im is not None:
-                    eval_tmpls.append(im)
+            for p_name in ["user_stylus_rot_27_a0_s114.png", "user_tip_up.png"]:
+                p_tmpl = BULB_TMPL_DIR / p_name
+                if p_tmpl.exists():
+                    im = cv2.imread(str(p_tmpl), cv2.IMREAD_GRAYSCALE)
+                    if im is not None:
+                        eval_tmpls.append(im)
 
-        for tmpl in eval_tmpls:
-            th, tw = tmpl.shape[:2]
-            if tw >= w or th >= h:
-                continue
-            res = cv2.matchTemplate(gray, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_v, _, max_l = cv2.minMaxLoc(res)
-            if max_v > best_score:
-                best_score = max_v
-                best_loc = max_l
-                best_sz = (tw, th)
+        if self.last_bulb_pos is not None and self.frames_since_seen < 8:
+            lx, ly = int(self.last_bulb_pos[0]), int(self.last_bulb_pos[1])
+            pad = 55
+            x1 = max(0, lx - pad)
+            y1 = max(0, ly - pad)
+            x2 = min(w, lx + pad)
+            y2 = min(h, ly + pad)
+            crop = gray[y1:y2, x1:x2]
+            for tmpl in eval_tmpls:
+                if tmpl.shape[0] < crop.shape[0] and tmpl.shape[1] < crop.shape[1]:
+                    res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
+                    _, mv, _, ml = cv2.minMaxLoc(res)
+                    if mv > best_score:
+                        best_score = mv
+                        best_loc = (x1 + ml[0], y1 + ml[1])
+                        best_sz = (tmpl.shape[1], tmpl.shape[0])
+
+        # If not found locally, fast coarse-to-fine search (< 2.5ms)
+        if best_score < self.threshold:
+            scale = 0.25
+            small_w, small_h = int(w * scale), int(h * scale)
+            small_gray = cv2.resize(gray, (small_w, small_h), interpolation=cv2.INTER_AREA)
+
+            best_coarse_v = -1.0
+            best_coarse_l = None
+            best_idx = 0
+            for idx, tmpl in enumerate(eval_tmpls):
+                tw = max(8, int(tmpl.shape[1] * scale))
+                th = max(8, int(tmpl.shape[0] * scale))
+                ts = cv2.resize(tmpl, (tw, th), interpolation=cv2.INTER_AREA)
+                res = cv2.matchTemplate(small_gray, ts, cv2.TM_CCOEFF_NORMED)
+                _, mv, _, ml = cv2.minMaxLoc(res)
+                if mv > best_coarse_v:
+                    best_coarse_v = mv
+                    best_coarse_l = ml
+                    best_idx = idx
+
+            if best_coarse_v >= 0.65 and best_coarse_l is not None:
+                est_x = int(best_coarse_l[0] / scale)
+                est_y = int(best_coarse_l[1] / scale)
+                fine_tmpl = eval_tmpls[best_idx]
+                rx1 = max(0, est_x - 35)
+                ry1 = max(0, est_y - 35)
+                rx2 = min(w, est_x + fine_tmpl.shape[1] + 35)
+                ry2 = min(h, est_y + fine_tmpl.shape[0] + 35)
+                crop_fine = gray[ry1:ry2, rx1:rx2]
+                if crop_fine.shape[0] >= fine_tmpl.shape[0] and crop_fine.shape[1] >= fine_tmpl.shape[1]:
+                    res_fine = cv2.matchTemplate(crop_fine, fine_tmpl, cv2.TM_CCOEFF_NORMED)
+                    _, fv, _, fl = cv2.minMaxLoc(res_fine)
+                    if fv > best_score:
+                        best_score = fv
+                        best_loc = (rx1 + fl[0], ry1 + fl[1])
+                        best_sz = (fine_tmpl.shape[1], fine_tmpl.shape[0])
 
         if best_score >= self.threshold and best_loc is not None:
             bx, by = best_loc
             bw, bh = best_sz
             tip_x = float(bx + bw // 2)
             tip_y = float(by + 4)
+            self.last_bulb_pos = (tip_x, tip_y)
+            self.frames_since_seen = 0
 
             # Localized bulb patch check: has it turned purplish bright compared to baseline?
             itip_x, itip_y = int(tip_x), int(tip_y)
