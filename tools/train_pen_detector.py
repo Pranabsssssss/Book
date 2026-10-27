@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument("-c", "--camera", default="auto", choices=["auto", "ribbon", "usb", "csi", "opencv", "webcam"],
                         help="Camera backend: 'auto', 'usb', or 'ribbon' (default: auto)")
     parser.add_argument("-d", "--device", type=int, default=0, help="Webcam device index (default: 0)")
+    parser.add_argument("-s", "--scale", type=float, default=2.0, help="Window display UI scale factor (default: 2.0 -> 1280x960)")
     parser.add_argument("--dataset", action="store_true", help="Train directly from dataset images on disk")
     parser.add_argument("--test", action="store_true", help="Launch directly into live test/verification mode")
     parser.add_argument("--save", action="store_true", default=True, help="Auto-save model after training")
@@ -174,45 +175,63 @@ def generate_synthesized_exemplars(base_patch: np.ndarray, tip_pt_rel: tuple) ->
 # =============================================================================
 
 class PenROISelector:
-    """Handles click-and-drag bounding box selection of the pen and clicking the bulb tip."""
-    def __init__(self, window_name="Smart Notebook — Pen Trainer"):
+    """Handles click-and-drag bounding box selection of the pen and clicking the bulb tip on upscaled UI."""
+    def __init__(self, window_name="Smart Notebook — Pen Trainer", ui_scale=2.0):
         self.window_name = window_name
+        self.ui_scale = float(ui_scale)
         self.selecting = False
         self.selection_done = False
-        self.x1, self.y1, self.x2, self.y2 = -1, -1, -1, -1
-        self.bulb_tip_pt = None
+        self.ui_x1, self.ui_y1 = -1, -1
+        self.ui_x2, self.ui_y2 = -1, -1
+        self.ui_bulb_tip = None
         self.step = "BOX"  # 'BOX' -> select pen in hand; 'TIP' -> click the 5mm bulb tip
 
     def reset(self):
         self.selecting = False
         self.selection_done = False
-        self.x1, self.y1, self.x2, self.y2 = -1, -1, -1, -1
-        self.bulb_tip_pt = None
+        self.ui_x1, self.ui_y1 = -1, -1
+        self.ui_x2, self.ui_y2 = -1, -1
+        self.ui_bulb_tip = None
         self.step = "BOX"
 
     def mouse_callback(self, event, x, y, flags, param):
         if self.step == "BOX":
             if event == cv2.EVENT_LBUTTONDOWN:
                 self.selecting = True
-                self.x1, self.y1 = x, y
-                self.x2, self.y2 = x, y
+                self.ui_x1, self.ui_y1 = x, y
+                self.ui_x2, self.ui_y2 = x, y
             elif event == cv2.EVENT_MOUSEMOVE and self.selecting:
-                self.x2, self.y2 = x, y
+                self.ui_x2, self.ui_y2 = x, y
             elif event == cv2.EVENT_LBUTTONUP and self.selecting:
                 self.selecting = False
-                self.x2, self.y2 = x, y
-                bx1, bx2 = min(self.x1, self.x2), max(self.x1, self.x2)
-                by1, by2 = min(self.y1, self.y2), max(self.y1, self.y2)
-                if (bx2 - bx1) >= 20 and (by2 - by1) >= 20:
-                    self.x1, self.x2 = bx1, bx2
-                    self.y1, self.y2 = by1, by2
+                self.ui_x2, self.ui_y2 = x, y
+                bx1, bx2 = min(self.ui_x1, self.ui_x2), max(self.ui_x1, self.ui_x2)
+                by1, by2 = min(self.ui_y1, self.ui_y2), max(self.ui_y1, self.ui_y2)
+                min_sz = int(25 * self.ui_scale / 2.0)
+                if (bx2 - bx1) >= min_sz and (by2 - by1) >= min_sz:
+                    self.ui_x1, self.ui_x2 = bx1, bx2
+                    self.ui_y1, self.ui_y2 = by1, by2
                     self.step = "TIP"
                     print("[PenTrainer] Pen bounding box set! Now CLICK directly on the 5mm IR BULB TIP.")
         elif self.step == "TIP":
             if event == cv2.EVENT_LBUTTONDOWN:
-                self.bulb_tip_pt = (x, y)
+                self.ui_bulb_tip = (x, y)
                 self.selection_done = True
-                print(f"[PenTrainer] Bulb tip selected at: {self.bulb_tip_pt}")
+                print(f"[PenTrainer] Bulb tip selected at UI: {self.ui_bulb_tip}")
+
+    def get_native_box(self) -> tuple:
+        """Returns (x1, y1, x2, y2) in native camera resolution (640x480)."""
+        x1 = int(min(self.ui_x1, self.ui_x2) / self.ui_scale)
+        y1 = int(min(self.ui_y1, self.ui_y2) / self.ui_scale)
+        x2 = int(max(self.ui_x1, self.ui_x2) / self.ui_scale)
+        y2 = int(max(self.ui_y1, self.ui_y2) / self.ui_scale)
+        return (x1, y1, x2, y2)
+
+    def get_native_tip(self) -> tuple:
+        """Returns (tx, ty) in native camera resolution (640x480)."""
+        if self.ui_bulb_tip is None:
+            return None
+        return (float(self.ui_bulb_tip[0] / self.ui_scale), float(self.ui_bulb_tip[1] / self.ui_scale))
 
 
 # =============================================================================
@@ -515,84 +534,152 @@ class PenModelTrainer:
 
 
 # =============================================================================
-# Interactive Studio HUD Rendering
+# Interactive Studio HUD Rendering (High-Resolution 1280x960 Large Readable UI)
 # =============================================================================
 
-def draw_studio_hud(frame: np.ndarray, mode: str, trainer: PenModelTrainer, selector: PenROISelector,
-                    det_result: dict, fps: float) -> np.ndarray:
-    """Renders comprehensive interactive studio overlay onto the camera frame."""
-    hud = frame.copy()
-    h, w = hud.shape[:2]
+def draw_studio_hud(frame_bgr: np.ndarray, mode: str, trainer: PenModelTrainer, selector: PenROISelector,
+                    det_result: dict, fps: float, ui_scale: float = 2.0) -> np.ndarray:
+    """
+    Renders a crystal-clear, high-resolution (1280x960), high-contrast HUD
+    with large readable fonts, prominent instructions, and dedicated status badges.
+    """
+    h_native, w_native = frame_bgr.shape[:2]
+    w_ui = int(w_native * ui_scale)
+    h_ui = int(h_native * ui_scale)
 
-    # Top Banner
-    banner_h = 75
+    # Upscale camera frame cleanly
+    hud = cv2.resize(frame_bgr, (w_ui, h_ui), interpolation=cv2.INTER_LINEAR)
+
+    # -------------------------------------------------------------
+    # 1. TOP HEADER BANNER (Large & Highly Readable, Height 140px)
+    # -------------------------------------------------------------
+    header_h = 140
     overlay = hud.copy()
-    cv2.rectangle(overlay, (0, 0), (w, banner_h), (18, 22, 28), -1)
-    cv2.addWeighted(overlay, 0.85, hud, 0.15, 0, hud)
+    cv2.rectangle(overlay, (0, 0), (w_ui, header_h), (14, 18, 24), -1)
+    cv2.addWeighted(overlay, 0.88, hud, 0.12, 0, hud)
 
-    # Title & Mode
-    cv2.putText(hud, "SMART NOTEBOOK — PEN & IR BULB TRAINER", (16, 26),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 240, 255), 2)
+    # Title
+    cv2.putText(hud, "SMART NOTEBOOK — PEN & IR BULB TRAINER", (24, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.05, (0, 240, 255), 3)
 
-    status_str = f"MODE: [{mode}]"
+    # Current Mode Badge
+    mode_color = (0, 255, 100) if mode == "VERIFY" else (0, 220, 255)
+    if mode in ("SELECT_BOX", "SELECT_TIP"):
+        mode_color = (0, 160, 255)  # Orange
+
+    mode_badge_text = f"CURRENT STEP: [{mode}]"
+    cv2.putText(hud, mode_badge_text, (24, 76),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.78, mode_color, 2)
+
+    # Prominent Step Instructions
     if mode == "CAPTURE":
-        sub_str = "Hold pen in hand. Press [R] to draw box, [SPACE] to capture, [T] to Train"
+        instr_text = "1. Hold pen in your hand with the 5mm IR bulb facing the camera."
+        sub_text = "Press [ R ] to Draw Box  |  [ SPACE ] Quick Capture  |  [ A ] Auto-Burst  |  [ T ] Train Model"
     elif mode == "SELECT_BOX":
-        sub_str = "DRAG MOUSE over pen in your hand, then release"
+        instr_text = ">> CLICK & DRAG MOUSE over the pen in your hand to select bounding box."
+        sub_text = "Release mouse when pen body + bulb are enclosed."
     elif mode == "SELECT_TIP":
-        sub_str = "CLICK directly on the 5mm IR BULB TIP at the end of the pen"
+        instr_text = ">> NOW CLICK ON THE 5mm CLEAR IR BULB TIP at the end of the pen!"
+        sub_text = "This anchors the exact stylus pointer coordinate."
     else:  # VERIFY
-        sub_str = "Live Verification: Move pen around. Button press triggers drawing"
+        instr_text = "LIVE TEST MODE: Move your pen around in front of the camera."
+        sub_text = "Press pen button to emit purple IR light & verify whiteboard drawing!"
 
-    cv2.putText(hud, f"{status_str} — {sub_str}", (16, 52),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 200, 200), 1)
+    cv2.putText(hud, instr_text, (24, 106),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    cv2.putText(hud, sub_text, (24, 130),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.60, (180, 220, 255), 1)
 
-    # Top-right stats
-    stat_x = w - 240
-    cv2.putText(hud, f"Samples: {len(trainer.samples_pen)} | FPS: {fps:.1f}", (stat_x, 26),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 100), 1)
+    # Top-Right Statistics Panel
+    stat_x = w_ui - 380
+    cv2.putText(hud, f"Samples: {len(trainer.samples_pen)}", (stat_x, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 120), 2)
+    cv2.putText(hud, f"FPS: {fps:.1f} | Threshold: {trainer.threshold:.2f}", (stat_x, 75),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 2)
 
-    thresh_str = f"Threshold: {trainer.threshold:.2f}"
-    cv2.putText(hud, thresh_str, (stat_x, 52),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 180, 180), 1)
+    # -------------------------------------------------------------
+    # 2. SELECTION BOX & BULB POINT (Scaled to UI)
+    # -------------------------------------------------------------
+    if selector.selecting or (selector.step == "TIP" and selector.ui_x1 != -1):
+        x1, y1 = selector.ui_x1, selector.ui_y1
+        x2, y2 = selector.ui_x2, selector.ui_y2
+        bx1, by1 = min(x1, x2), min(y1, y2)
+        bx2, by2 = max(x1, x2), max(y1, y2)
+        cv2.rectangle(hud, (bx1, by1), (bx2, by2), (0, 255, 255), 3)
+        cv2.putText(hud, "PEN IN HAND SELECTION", (bx1, max(30, by1 - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
 
-    # Active Selection Box (while dragging)
-    if selector.selecting or (selector.step == "TIP" and selector.x1 != -1):
-        x1, y1 = selector.x1, selector.y1
-        x2, y2 = selector.x2, selector.y2
-        cv2.rectangle(hud, (min(x1, x2), min(y1, y2)), (max(x1, x2), max(y1, y2)), (0, 255, 255), 2)
-        cv2.putText(hud, "PEN IN HAND", (min(x1, x2), max(15, min(y1, y2) - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 2)
+    if selector.ui_bulb_tip is not None:
+        tx, ty = selector.ui_bulb_tip
+        cv2.circle(hud, (tx, ty), 10, (0, 0, 255), -1)
+        cv2.circle(hud, (tx, ty), 18, (0, 255, 255), 2)
+        cv2.putText(hud, "5mm IR BULB TIP", (tx + 16, ty - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
 
-    if selector.bulb_tip_pt is not None:
-        tx, ty = selector.bulb_tip_pt
-        cv2.circle(hud, (tx, ty), 6, (0, 0, 255), -1)
-        cv2.putText(hud, "IR BULB TIP", (tx + 10, ty - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 255), 2)
-
-    # Live Detection Status Badge in VERIFY mode
-    if mode == "VERIFY" and det_result is not None:
+    # -------------------------------------------------------------
+    # 3. LIVE DETECTION OVERLAYS (Scaled for Large Visibility)
+    # -------------------------------------------------------------
+    if det_result is not None:
         state = det_result.get("state", "NO_PEN")
         pt = det_result.get("point")
         conf = det_result.get("confidence", 0.0)
 
-        badge_y = h - 30
-        overlay_b = hud.copy()
-        cv2.rectangle(overlay_b, (0, h - 55), (w, h), (18, 22, 28), -1)
-        cv2.addWeighted(overlay_b, 0.85, hud, 0.15, 0, hud)
+        if pt is not None:
+            ui_pt_x = int(pt[0] * ui_scale)
+            ui_pt_y = int(pt[1] * ui_scale)
+
+            if state == "IR_EMITTING":
+                # Glowing magenta & green target reticle
+                cv2.circle(hud, (ui_pt_x, ui_pt_y), 28, (255, 0, 255), 3)
+                cv2.circle(hud, (ui_pt_x, ui_pt_y), 8, (0, 255, 0), -1)
+                cv2.line(hud, (ui_pt_x - 45, ui_pt_y), (ui_pt_x + 45, ui_pt_y), (0, 255, 0), 3)
+                cv2.line(hud, (ui_pt_x, ui_pt_y - 45), (ui_pt_x, ui_pt_y + 45), (0, 255, 0), 3)
+                cv2.putText(hud, "IR LED EMITTING [DRAWING ACTIVE]", (ui_pt_x + 35, ui_pt_y - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 0, 255), 2)
+
+            elif state == "PEN_IDLE":
+                # Green pen box and tip pointer
+                cv2.circle(hud, (ui_pt_x, ui_pt_y), 20, (0, 255, 100), 3)
+                cv2.circle(hud, (ui_pt_x, ui_pt_y), 6, (0, 255, 100), -1)
+                cv2.line(hud, (ui_pt_x - 32, ui_pt_y), (ui_pt_x + 32, ui_pt_y), (0, 255, 100), 2)
+                cv2.line(hud, (ui_pt_x, ui_pt_y - 32), (ui_pt_x, ui_pt_y + 32), (0, 255, 100), 2)
+                cv2.arrowedLine(hud, (ui_pt_x, ui_pt_y - 50), (ui_pt_x, ui_pt_y - 15),
+                                (0, 240, 255), 3, tipLength=0.35)
+                cv2.putText(hud, f"5mm BULB TIP ({int(pt[0])}, {int(pt[1])})", (ui_pt_x + 28, ui_pt_y - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.70, (0, 240, 255), 2)
+
+    # -------------------------------------------------------------
+    # 4. BOTTOM STATUS BAR & KEYBOARD SHORTCUTS (Height 120px)
+    # -------------------------------------------------------------
+    footer_h = 120
+    overlay_f = hud.copy()
+    cv2.rectangle(overlay_f, (0, h_ui - footer_h), (w_ui, h_ui), (14, 18, 24), -1)
+    cv2.addWeighted(overlay_f, 0.90, hud, 0.10, 0, hud)
+
+    # Line 1: Live Status Readout
+    if det_result is not None:
+        state = det_result.get("state", "NO_PEN")
+        pt = det_result.get("point")
+        conf = det_result.get("confidence", 0.0)
 
         if state == "IR_EMITTING":
             excess = det_result.get("purple_excess", 0.0)
-            tag = f"● [PEN STATE: IR BULB EMITTING] -> Tip ({int(pt[0])}, {int(pt[1])}) | Purple Meter: +{excess:.1f} > 8.0 [DRAWING ON]"
-            tag_col = (0, 255, 100)
+            status_line = f"● [PEN STATE: IR BULB EMITTING] -> Bulb Tip ({int(pt[0])}, {int(pt[1])}) | Purple Meter: +{excess:.1f} > 8.0 [WHITEBOARD DRAWING ACTIVE]"
+            status_col = (0, 255, 100)
         elif state == "PEN_IDLE":
-            tag = f"● [PEN STATE: PEN IN HAND (BULB UNLIT)] -> Tip ({int(pt[0])}, {int(pt[1])}) | Confidence: {conf*100:.1f}% [HOVER TRACKING]"
-            tag_col = (0, 240, 255)
+            status_line = f"● [PEN STATE: PEN IN HAND (BULB UNLIT)] -> Bulb Tip ({int(pt[0])}, {int(pt[1])}) | Confidence: {conf*100:.1f}% [HOVER TRACKING]"
+            status_col = (0, 240, 255)
         else:
-            tag = "○ [PEN STATE: NO PEN DETECTED] -> Idle (Room background rejected 100%)"
-            tag_col = (140, 140, 140)
+            status_line = "○ [PEN STATE: NO PEN DETECTED] -> Idle (Room furniture, screws, and lights rejected 100%)"
+            status_col = (160, 160, 160)
 
-        cv2.putText(hud, tag, (18, badge_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, tag_col, 2)
+        cv2.putText(hud, status_line, (24, h_ui - 68),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.72, status_col, 2)
+
+    # Line 2: Keyboard Shortcuts Bar
+    shortcuts_line = "[ R ] Select Pen ROI   |   [ SPACE ] Capture   |   [ A ] Auto-Burst   |   [ T ] Train   |   [ V ] Verify   |   [ S ] Save   |   [ Q ] Quit"
+    cv2.putText(hud, shortcuts_line, (24, h_ui - 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 220, 100), 2)
 
     return hud
 
@@ -603,8 +690,13 @@ def draw_studio_hud(frame: np.ndarray, mode: str, trainer: PenModelTrainer, sele
 
 def run_interactive_studio(args):
     """Runs the full interactive OpenCV studio window."""
+    ui_scale = getattr(args, "scale", 2.0)
+    w_ui = int(CAMERA_WIDTH * ui_scale)
+    h_ui = int(CAMERA_HEIGHT * ui_scale)
+
     win_name = "Smart Notebook — Pen Trainer"
-    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win_name, w_ui, h_ui)
 
     # Open Camera
     backend_mode = normalize_backend(args.camera)
@@ -612,9 +704,10 @@ def run_interactive_studio(args):
                  device_index=args.device, backend=backend_mode)
     if not cam.open():
         print(f"[PenTrainer] Error: Could not open camera (backend={backend_mode}, index={args.device}).")
+        print("Tip: If USB webcam index is not 0, try running with: py tools/train_pen_detector.py --device 1")
         return False
 
-    selector = PenROISelector(win_name)
+    selector = PenROISelector(win_name, ui_scale=ui_scale)
     cv2.setMouseCallback(win_name, selector.mouse_callback)
 
     trainer = PenModelTrainer(camera=cam)
@@ -623,7 +716,7 @@ def run_interactive_studio(args):
     trainer.train_from_dataset()
 
     mode = "VERIFY" if args.test else "CAPTURE"
-    print(f"[PenTrainer] Interactive studio started in [{mode}] mode.")
+    print(f"[PenTrainer] Interactive studio started in [{mode}] mode (Window size: {w_ui}x{h_ui}).")
     print("Controls:")
     print("  [R]     : Select Pen ROI (Drag box around pen in hand, then click bulb tip)")
     print("  [SPACE] : Capture sample frame into training set")
@@ -650,7 +743,6 @@ def run_interactive_studio(args):
 
             # Run detection if in VERIFY mode or CAPTURE mode
             det_result = trainer.detect_in_frame(frame)
-            disp_frame = det_result.get("annotated", frame).copy()
 
             # Handle interactive selection state
             current_mode = mode
@@ -660,17 +752,17 @@ def run_interactive_studio(args):
                 current_mode = "SELECT_BOX"
 
             # Check if selection just completed
-            if selector.selection_done and selector.bulb_tip_pt is not None:
-                x1, x2 = min(selector.x1, selector.x2), max(selector.x1, selector.x2)
-                y1, y2 = min(selector.y1, selector.y2), max(selector.y1, selector.y2)
-                trainer.add_pen_sample(frame, (x1, y1, x2, y2), selector.bulb_tip_pt)
+            if selector.selection_done and selector.ui_bulb_tip is not None:
+                x1, y1, x2, y2 = selector.get_native_box()
+                tip_pt = selector.get_native_tip()
+                if (x2 - x1) >= 20 and (y2 - y1) >= 20 and tip_pt is not None:
+                    trainer.add_pen_sample(frame, (x1, y1, x2, y2), tip_pt)
+                    trainer.train()
+                    mode = "VERIFY"
                 selector.reset()
-                # Retrain with the new sample
-                trainer.train()
-                mode = "VERIFY"
 
-            # Render HUD
-            hud_view = draw_studio_hud(disp_frame, current_mode, trainer, selector, det_result, fps)
+            # Render High-Resolution HUD (1280x960)
+            hud_view = draw_studio_hud(frame, current_mode, trainer, selector, det_result, fps, ui_scale=ui_scale)
             cv2.imshow(win_name, hud_view)
 
             key = cv2.waitKey(1) & 0xFF
