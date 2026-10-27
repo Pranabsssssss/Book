@@ -19,7 +19,7 @@ pt_emit, _, _, meta_emit = det.detect_debug(frame_emit)
 print('=== Test User Reference Emitting IR LED ===')
 print('Detected Point:', pt_emit)
 print('Status:', meta_emit['status'])
-print('Confidence:', f"{meta_emit['ir_confidence']:.1f}%")
+print('Purple Excess:', f"+{meta_emit['purple_excess']:.1f}")
 assert pt_emit is not None, 'Failed to detect user emitting IR LED!'
 
 # 2. Test user's real unlit bulb image (Image 1)
@@ -33,7 +33,7 @@ pt_off, _, _, meta_off = det.detect_debug(frame_off)
 print('\n=== Test User Reference Unlit 5mm Bulb ===')
 print('Detected Point:', pt_off)
 print('Status:', meta_off['status'])
-print('Confidence:', f"{meta_off['ir_confidence']:.1f}%")
+print('Purple Excess:', f"+{meta_off['purple_excess']:.1f}")
 assert pt_off is None, 'Failed: Unlit bulb was detected as emitting light!'
 
 # 3. Test Whiteboard Drawing (pure white light)
@@ -44,7 +44,7 @@ pt_white, _, _, meta_white = det.detect_debug(frame_white)
 print('\n=== Test Whiteboard Drawing (White Light) ===')
 print('Detected Point:', pt_white)
 print('Status:', meta_white['status'])
-print('Confidence:', f"{meta_white['ir_confidence']:.1f}%")
+print('Purple Excess:', f"+{meta_white['purple_excess']:.1f}")
 assert pt_white is None, 'Failed: Whiteboard drawing was detected as emitting light!'
 
 print('\nALL END-TO-END VERIFICATION TESTS PASSED PERFECTLY!')

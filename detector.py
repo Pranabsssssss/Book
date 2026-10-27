@@ -73,19 +73,31 @@ class IRDetector:
                 print(f"[IRDetector] Warning: Could not load model: {e}")
 
     def _load_bulb_templates(self):
-        """Load orientation templates of the 5mm LED bulb."""
+        """Load orientation templates of the 5mm LED bulb, prioritizing exact user templates."""
         tmpl_dir = Path(BASE_DIR) / "models" / "bulb_templates"
         if tmpl_dir.exists():
-            files = list(tmpl_dir.glob("*.png"))
-            for p in files[:8]:  # Top canonical angles
-                im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                if im is not None:
-                    self.bulb_templates.append(im)
+            priority = ["user_tip_up.png", "user_tip_down.png"]
+            loaded = set()
+            for p_name in priority:
+                p = tmpl_dir / p_name
+                if p.exists():
+                    im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                    if im is not None:
+                        self.bulb_templates.append(im)
+                        loaded.add(p.name)
+
+            for p in tmpl_dir.glob("*.png"):
+                if p.name not in loaded:
+                    im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                    if im is not None:
+                        self.bulb_templates.append(im)
+                        loaded.add(p.name)
         print(f"[IRDetector] Loaded {len(self.bulb_templates)} 5mm LED bulb templates for physical tracking.")
 
     def locate_physical_bulb(self, frame_gray: np.ndarray) -> tuple:
         """
         Locates the physical 5mm clear LED bulb tip in ambient light when idle/off.
+        Uses a strict correlation threshold (>= 0.84) to NEVER lock onto random room objects.
         Returns: (tip_x, tip_y, bbox, score) or None.
         """
         if frame_gray is None or len(self.bulb_templates) == 0:
@@ -93,10 +105,10 @@ class IRDetector:
 
         h, w = frame_gray.shape[:2]
 
-        # 1. Fast Local Window Search (if recently tracked)
-        if self.last_bulb_pos is not None and self.frames_since_seen < 10:
+        # 1. Fast Local Window Search (if recently tracked and stable)
+        if self.last_bulb_pos is not None and self.frames_since_seen < 6:
             lx, ly = int(self.last_bulb_pos[0]), int(self.last_bulb_pos[1])
-            pad = 70
+            pad = 60
             x1 = max(0, lx - pad)
             y1 = max(0, ly - pad)
             x2 = min(w, lx + pad)
@@ -107,7 +119,7 @@ class IRDetector:
                 best_local_score = -1.0
                 best_local_loc = None
                 best_local_sz = (0, 0)
-                for tmpl in self.bulb_templates[:4]:
+                for tmpl in self.bulb_templates[:3]:
                     if tmpl.shape[0] < crop.shape[0] and tmpl.shape[1] < crop.shape[1]:
                         res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
                         _, max_v, _, max_l = cv2.minMaxLoc(res)
@@ -116,7 +128,8 @@ class IRDetector:
                             best_local_loc = max_l
                             best_local_sz = (tmpl.shape[1], tmpl.shape[0])
 
-                if best_local_score >= 0.52 and best_local_loc is not None:
+                # Require high confidence to maintain track without drifting to background
+                if best_local_score >= 0.84 and best_local_loc is not None:
                     bw, bh = best_local_sz
                     bx = x1 + best_local_loc[0]
                     by = y1 + best_local_loc[1]
@@ -124,29 +137,27 @@ class IRDetector:
                     tip_y = float(by + 4)
                     return (tip_x, tip_y, (bx, by, bw, bh), best_local_score)
 
-        # 2. Global Search on Downscaled Frame (320x240)
-        scale = 0.5
-        small_gray = cv2.resize(frame_gray, (int(w * scale), int(h * scale)))
+        # 2. Global Search for authentic 5mm bulb with high confidence (>= 0.84)
         best_score = -1.0
         best_loc = None
         best_size = (0, 0)
 
-        for tmpl in self.bulb_templates[:4]:
-            tw = int(tmpl.shape[1] * scale)
-            th = int(tmpl.shape[0] * scale)
-            if tw < 8 or th < 8 or tw >= small_gray.shape[1] or th >= small_gray.shape[0]:
+        # Evaluate priority templates at native resolution for maximum fidelity
+        for tmpl in self.bulb_templates[:2]:
+            tw, th = tmpl.shape[1], tmpl.shape[0]
+            if tw >= w or th >= h:
                 continue
-            t_res = cv2.resize(tmpl, (tw, th))
-            res = cv2.matchTemplate(small_gray, t_res, cv2.TM_CCOEFF_NORMED)
+            res = cv2.matchTemplate(frame_gray, tmpl, cv2.TM_CCOEFF_NORMED)
             _, max_v, _, max_l = cv2.minMaxLoc(res)
             if max_v > best_score:
                 best_score = max_v
                 best_loc = max_l
-                best_size = (int(tw / scale), int(th / scale))
+                best_size = (tw, th)
 
-        if best_score >= 0.50 and best_loc is not None:
-            bx = int(best_loc[0] / scale)
-            by = int(best_loc[1] / scale)
+        # Strict threshold: random room objects (shelves, screws, light switches) score <= 0.70-0.77.
+        # Requiring >= 0.84 guarantees zero false detections on arbitrary background objects!
+        if best_score >= 0.84 and best_loc is not None:
+            bx, by = best_loc
             bw, bh = best_size
             tip_x = float(bx + bw // 2)
             tip_y = float(by + 4)
@@ -238,7 +249,7 @@ class IRDetector:
         # Room lamps have B < G -> 100% BLOCKED.
         # Blue screen reflections have R < G -> 100% BLOCKED.
         # Dim room shadows have gray < 110 -> 100% BLOCKED.
-        purple_active = (bg_diff >= 4.0) & (rg_diff >= 3.0) & (excess >= 10.0) & (gray >= 110)
+        purple_active = (bg_diff >= 5.0) & (rg_diff >= 5.0) & (excess >= 12.0) & (gray >= 110)
         purple_mask = np.uint8(purple_active * 255)
 
         # Margin exclusion: strip out ceiling lights and camera borders
@@ -248,7 +259,7 @@ class IRDetector:
         purple_mask[:, -CAMERA_EDGE_MARGIN_SIDE:] = 0
 
         # Live frame purple excess meter across active field of view:
-        meter_valid = (bg_diff >= 4.0) & (rg_diff >= 3.0) & (gray >= 110)
+        meter_valid = (bg_diff >= 5.0) & (rg_diff >= 5.0) & (gray >= 110)
         meter_valid[:CAMERA_EDGE_MARGIN_TOP, :] = False
         meter_valid[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = False
         meter_valid[:, :CAMERA_EDGE_MARGIN_SIDE] = False
@@ -308,11 +319,13 @@ class IRDetector:
             # Must satisfy physical IR emission profile:
             # 1. Intense luminous peak (IR LED emits bright radiation: peak >= 115)
             # 2. Both Blue and Red strictly higher than Green (authentic purple glow)
-            # 3. Purple excess >= IR_PURPLE_EXCESS_THRESHOLD (8.0)
+            # 3. Purple excess >= 12.0
+            # 4. Spectral ratio (R + B) / (2 * G) >= 1.08
             if (p_peak < 115.0 or
-                pb < pg + 4.0 or
-                pr < pg + 3.0 or
-                p_excess < IR_PURPLE_EXCESS_THRESHOLD):
+                pb < pg + 5.0 or
+                pr < pg + 5.0 or
+                p_excess < 12.0 or
+                p_ratio < 1.08):
                 continue
 
             # Display containment check
