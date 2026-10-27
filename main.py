@@ -51,9 +51,21 @@ def parse_args():
         help=f"IR brightness threshold (0-255, default: {IR_THRESHOLD})"
     )
     parser.add_argument(
+        "--led",
+        type=str,
+        default=None,
+        choices=["green", "ir", "auto"],
+        help="LED stylus type: 'green' (5mm Green LED) or 'ir' (Infrared LED)"
+    )
+    parser.add_argument(
+        "--retrain",
+        action="store_true",
+        help="Launch the interactive Green LED Retraining & Calibration Studio"
+    )
+    parser.add_argument(
         "--capture",
         action="store_true",
-        help="Launch the interactive 1000-image camera dataset recorder to capture training data"
+        help="Launch the interactive camera dataset recorder to capture training data"
     )
     return parser.parse_args()
 
@@ -111,7 +123,18 @@ def select_operating_mode(cli_mode_arg: str) -> str:
 def main():
     args = parse_args()
 
-    # Fast-path: Launch 1000-Image Camera Dataset Capture Tool if requested
+    # Fast-path: Launch Green LED Retraining Studio if requested
+    if args.retrain:
+        from tools.retrain_green_detector import main as run_retrain
+        sys.argv = [sys.argv[0]]
+        if args.camera:
+            sys.argv.extend(["--camera", args.camera])
+        if args.device is not None:
+            sys.argv.extend(["--device", str(args.device)])
+        run_retrain()
+        sys.exit(0)
+
+    # Fast-path: Launch Camera Dataset Capture Tool if requested
     if args.capture:
         from tools.capture_dataset import main as run_capture
         sys.argv = [sys.argv[0]]
@@ -190,11 +213,12 @@ def main():
     print("[Main] Initializing coordinate transformer & detector for active display...")
     transformer = CoordinateTransformer(homography_matrix, screen_width=whiteboard.width, screen_height=whiteboard.height)
     display_quad = transformer.get_display_quad()
-    detector = IRDetector(threshold=args.threshold)
+    detector = IRDetector(threshold=args.threshold, led_type=args.led)
+    led_desc = "5mm GREEN LED" if detector.led_type == "green" else "IR LED"
 
     # 5. Main Event & Tracking Loop
     print("\n[Main] Smart Notebook is active!")
-    print(" - Press the IR pen button / remote control to draw on screen.")
+    print(f" - Press the {led_desc} pen button to draw on screen.")
     print(" - Release the button to lift the pen.")
     print(" - Tap or blink light on ERASER or SAVE buttons to trigger.")
     print(" - Press [TAB] or [D] to toggle between Production and Testing modes.")

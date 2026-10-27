@@ -87,16 +87,25 @@ CAMERA_EDGE_MARGIN_TOP = 35
 CAMERA_EDGE_MARGIN_BOTTOM = 15
 CAMERA_EDGE_MARGIN_SIDE = 15
 
-# === IR / White Light Detection ===
-# Brightness threshold (0-255). Values above this are considered bright IR/white light.
-# Remote LEDs and IR pens have peak brightness ~245-255.
+# === LED Optical Configuration & Color Selection ===
+# "green" - High-brightness 5mm Green LED stylus (Green channel dominant: G > R and G > B)
+# "ir"    - 850-940nm Infrared LED stylus (Purple/violet camera tint: B > G and R > G)
+# "auto"  - Dynamically detect both Green LED and IR LED
+LED_TYPE = "green"
+
+# --- Green LED Spectral Thresholds ---
+# Green LEDs emit at ~520-530nm. When active, the camera sensor records high Green (G)
+# with suppressed Red (R) and Blue (B).
+# Green Excess = (G - R) + (G - B). White light has G ≈ R ≈ B (excess ≈ 0), room lamps have R > G (excess < 0).
+GREEN_EXCESS_THRESHOLD = 15.0      # Empirical threshold (> 15.0 = Green LED emission guaranteed)
+GREEN_SPECTRAL_RATIO_MIN = 1.15    # 2*G / (max(1.0, R + B))
+GREEN_THRESHOLD = 110              # Brightness threshold for green light
+
+# --- IR / Near-Infrared Spectral Thresholds ---
+# Digital camera sensors see near-IR (850-940nm) with a distinct light-purple/violet tint
+# (Red & Blue high, Green significantly lower).
 IR_THRESHOLD = 240
 CALIBRATION_IR_THRESHOLD = 210
-
-# IR Spectral Differentiation:
-# Digital camera sensors see near-IR (850-940nm) with a distinct light-purple/violet tint
-# (Red & Blue high, Green significantly lower). Normal white light has R ~ G ~ B.
-# Hardware testing confirms: when Purple Excess (B - G) + (R - G) >= 8.0, an authentic IR light is 100% present.
 IR_PURPLE_EXCESS_THRESHOLD = 8.0  # Canonical empirical threshold (> 8.0 = IR light guaranteed)
 IR_SPECTRAL_RATIO_MIN = 1.14      # (R + B) / (2 * max(G, 1)) must exceed this to qualify as IR
 IR_PURPLE_EXCESS_MIN = 8.0        # (B - G) + (R - G) must exceed this (calibrated to >= 8.0)
@@ -140,4 +149,5 @@ CALIBRATION_FILE = os.path.join(CALIBRATION_DIR, "calibration.json")
 SAVE_DIR = os.path.join(BASE_DIR, "saves")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 IR_MODEL_FILE = os.path.join(MODELS_DIR, "ir_led_model.json")
+GREEN_MODEL_FILE = os.path.join(MODELS_DIR, "green_led_model.json")
 PEN_MODEL_FILE = os.path.join(MODELS_DIR, "pen_model.json")

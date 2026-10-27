@@ -351,7 +351,9 @@ class Whiteboard:
         circ_val = self.dev_info.get("circularity", 0.0)
         aspect_val = self.dev_info.get("aspect_ratio", 0.0)
         in_display = self.dev_info.get("in_display_area", False)
-        excess_val = self.dev_info.get("purple_excess", 0.0)
+        excess_val = self.dev_info.get("excess", self.dev_info.get("purple_excess", 0.0))
+        led_name = "GREEN LED" if self.dev_info.get("led_type") == "green" else "IR LED"
+        thresh_val = 15.0 if self.dev_info.get("led_type") == "green" else 8.0
         is_ir = self.dev_info.get("is_ir_purple", False)
         is_emitting = self.dev_info.get("is_emitting", False)
         bulb_state = self.dev_info.get("bulb_state", "SEARCHING")
@@ -370,20 +372,21 @@ class Whiteboard:
                 action_str = "LIGHT ON (MARKING ON BOARD)"
 
         if is_emitting:
-            bulb_status_str = f"EMITTING PURPLE IR (+{excess_val:.0f} Excess) [DRAWING]"
+            bulb_status_str = f"EMITTING {led_name} (+{excess_val:.0f} Excess) [DRAWING]"
         elif bulb_state == "LOCATED_IDLE":
             bulb_status_str = f"5mm BULB LOCATED AT {bulb_pos_str} [IDLE - PRESS BUTTON TO DRAW]"
         else:
-            bulb_status_str = "SEARCHING FOR 5mm LED BULB..."
+            bulb_status_str = f"SEARCHING FOR 5mm {led_name} BULB..."
 
         tele_lines = [
             f"FPS              : {fps:.1f}",
             f"Display Size     : {self.width}x{self.height} (Aspect: {self.aspect_ratio:.2f}:1)",
             f"Threshold        : {self.current_threshold} (Press [ to lower, ] to raise)",
+            f"LED Stylus Type  : {led_name}",
             f"Physical 5mm Bulb: {bulb_status_str}",
             f"Bulb Tip Position: {bulb_pos_str}",
-            f"IR Excess Meter  : +{excess_val:.1f} (Threshold: > 8.0) -> {'[IR ON: YES]' if is_emitting else '[IR ON: NO]'}",
-            f"Purple IR Light  : {'ACTIVE (EMITTING PURPLE)' if is_emitting else 'OFF / IDLE (PEN LIFTED)'}",
+            f"LED Excess Meter : +{excess_val:.1f} (Threshold: > {thresh_val:.1f}) -> {'[LED ON: YES]' if is_emitting else '[LED ON: NO]'}",
+            f"Optical State    : {'ACTIVE (EMITTING ' + led_name + ')' if is_emitting else 'OFF / IDLE (PEN LIFTED)'}",
             f"White Board Disc : ACTIVE (Whiteboard drawings 100% rejected)",
             f"Display Bounds   : DocScanner Quad (Active)",
             f"In Display Area  : {'YES (Inside Display Quad)' if in_display else 'NO (Outside Screen Quad)'}",

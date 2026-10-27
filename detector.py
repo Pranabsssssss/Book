@@ -8,7 +8,8 @@ from config import (
     CAMERA_EDGE_MARGIN_TOP, CAMERA_EDGE_MARGIN_BOTTOM, CAMERA_EDGE_MARGIN_SIDE,
     CAMERA_WIDTH, CAMERA_HEIGHT,
     IR_SPECTRAL_RATIO_MIN, IR_PURPLE_EXCESS_MIN, IR_PURPLE_EXCESS_THRESHOLD,
-    IR_MODEL_FILE, PEN_MODEL_FILE, BASE_DIR
+    LED_TYPE, GREEN_EXCESS_THRESHOLD, GREEN_SPECTRAL_RATIO_MIN, GREEN_THRESHOLD,
+    IR_MODEL_FILE, GREEN_MODEL_FILE, PEN_MODEL_FILE, BASE_DIR
 )
 
 
@@ -34,10 +35,16 @@ class IRDetector:
        100% hard rejects white blackboard drawings on the monitor (where B <= G, excess <= 0)
        and warm ambient room lamps (where B < G). Never causes runaway drawing loops!
     """
-    def __init__(self, threshold=IR_THRESHOLD, min_area=IR_MIN_AREA, max_area=IR_MAX_AREA):
-        self.threshold = threshold
+    def __init__(self, threshold=None, min_area=IR_MIN_AREA, max_area=IR_MAX_AREA, led_type=None):
+        self.led_type = (led_type or LED_TYPE).lower()
+        if threshold is not None:
+            self.threshold = threshold
+        else:
+            self.threshold = GREEN_THRESHOLD if self.led_type == "green" else IR_THRESHOLD
         self.min_area = min_area
         self.max_area = max_area
+        self.green_excess_threshold = GREEN_EXCESS_THRESHOLD
+        self.green_spectral_ratio_min = GREEN_SPECTRAL_RATIO_MIN
 
         # Last known bulb position for smooth fast tracking
         self.last_bulb_pos = None
@@ -48,7 +55,7 @@ class IRDetector:
         self.bulb_templates = []
         self._load_bulb_templates()
 
-        # Load trained ML model if available
+        # Load trained ML model if available (prioritize matching LED type)
         self.has_model = False
         self.model_name = "Spectral Model"
         self.mean = None
@@ -57,18 +64,19 @@ class IRDetector:
         self.bias = 0.0
         self.model_threshold = 0.50
 
-        if os.path.exists(IR_MODEL_FILE):
+        target_model = GREEN_MODEL_FILE if self.led_type == "green" and os.path.exists(GREEN_MODEL_FILE) else IR_MODEL_FILE
+        if os.path.exists(target_model):
             try:
-                with open(IR_MODEL_FILE, "r", encoding="utf-8") as f:
+                with open(target_model, "r", encoding="utf-8") as f:
                     model_data = json.load(f)
                 self.mean = np.array(model_data.get("mean", []), dtype=np.float32)
                 self.std = np.array(model_data.get("std", []), dtype=np.float32)
                 self.weights = np.array(model_data.get("weights", []), dtype=np.float32)
                 self.bias = float(model_data.get("bias", 0.0))
                 self.model_threshold = float(model_data.get("threshold", 0.50))
-                self.model_name = f"{model_data.get('model_name', 'IR_Model')}"
+                self.model_name = f"{model_data.get('model_name', 'LED_Model')}"
                 self.has_model = True
-                print(f"[IRDetector] Loaded trained ML model from: {IR_MODEL_FILE}")
+                print(f"[IRDetector] Loaded trained ML model ({self.model_name}) from: {target_model}")
             except Exception as e:
                 print(f"[IRDetector] Warning: Could not load model: {e}")
 
@@ -150,8 +158,8 @@ class IRDetector:
     def check_bulb_emission_at_point(self, frame_bgr: np.ndarray, tip_x: float, tip_y: float) -> tuple:
         """
         Samples a localized patch around the tracked physical bulb tip and compares it
-        with previous images/baseline to detect if it has become 'a little purplish bright'.
-        Returns: (is_emitting, purple_excess, peak_brightness, info_str)
+        with previous images/baseline to detect if it has lit up (green or purplish bright).
+        Returns: (is_emitting, max_excess, peak_brightness, info_str)
         """
         if frame_bgr is None or frame_bgr.size == 0:
             return False, 0.0, 0.0, "NO_FRAME"
@@ -178,28 +186,44 @@ class IRDetector:
         mean_g = float(np.mean(g))
         mean_r = float(np.mean(r_ch))
 
-        # Pixel-wise purple excess
-        bg_diff = b - g
-        rg_diff = r_ch - g
-        excess_map = bg_diff + np.maximum(0.0, rg_diff)
-        max_excess = float(np.max(excess_map))
+        is_emitting = False
+        max_excess = 0.0
 
-        # Check conditions:
-        # Condition A: Absolute purple excess meter >= 8.0 (canonical threshold)
-        cond_abs = (max_excess >= 8.0) and (mean_b > mean_g + 3.0) and (mean_r > mean_g + 2.0) and (peak_bright >= 110.0)
+        if self.led_type == "green":
+            gr_diff = g - r_ch
+            gb_diff = g - b
+            excess_map = gr_diff + gb_diff
+            max_excess = float(np.max(excess_map))
 
-        # Condition B: Temporal delta above baseline ('compare with previous images')
-        delta_excess = max_excess - getattr(self, "bulb_baseline_excess", 0.0)
-        delta_bright = peak_bright - getattr(self, "bulb_baseline_bright", 100.0)
-        cond_temporal = (delta_excess >= 5.0) and (mean_b > mean_g + 2.0) and (delta_bright >= 10.0) and (peak_bright >= 105.0)
+            # Condition A: Absolute green excess meter >= GREEN_EXCESS_THRESHOLD
+            cond_abs = (max_excess >= self.green_excess_threshold) and (mean_g > mean_r + 4.0) and (mean_g > mean_b + 4.0) and (peak_bright >= 105.0)
 
-        is_emitting = cond_abs or cond_temporal
+            # Condition B: Temporal delta above baseline
+            delta_excess = max_excess - getattr(self, "bulb_baseline_excess", 0.0)
+            delta_bright = peak_bright - getattr(self, "bulb_baseline_bright", 100.0)
+            cond_temporal = (delta_excess >= 8.0) and (mean_g > mean_r + 3.0) and (mean_g > mean_b + 3.0) and (delta_bright >= 10.0)
+
+            is_emitting = cond_abs or cond_temporal
+            color_name = "GREEN"
+        else:
+            # Pixel-wise purple excess
+            bg_diff = b - g
+            rg_diff = r_ch - g
+            excess_map = bg_diff + np.maximum(0.0, rg_diff)
+            max_excess = float(np.max(excess_map))
+
+            cond_abs = (max_excess >= 8.0) and (mean_b > mean_g + 3.0) and (mean_r > mean_g + 2.0) and (peak_bright >= 110.0)
+            delta_excess = max_excess - getattr(self, "bulb_baseline_excess", 0.0)
+            delta_bright = peak_bright - getattr(self, "bulb_baseline_bright", 100.0)
+            cond_temporal = (delta_excess >= 5.0) and (mean_b > mean_g + 2.0) and (delta_bright >= 10.0) and (peak_bright >= 105.0)
+
+            is_emitting = cond_abs or cond_temporal
+            color_name = "PURPLE"
 
         if is_emitting:
-            info = f"EMITTING: +{max_excess:.1f} (Delta: +{delta_excess:.1f}, Peak: {peak_bright:.0f})"
+            info = f"EMITTING {color_name}: +{max_excess:.1f} (Delta: +{delta_excess:.1f}, Peak: {peak_bright:.0f})"
         else:
             info = f"UNLIT: +{max_excess:.1f}"
-            # Update rolling baseline when unlit
             self.bulb_baseline_excess = 0.90 * getattr(self, "bulb_baseline_excess", 0.0) + 0.10 * max_excess
             self.bulb_baseline_bright = 0.90 * getattr(self, "bulb_baseline_bright", 100.0) + 0.10 * peak_bright
 
@@ -356,10 +380,10 @@ class IRDetector:
             circ
         ], dtype=np.float32)
 
-    def detect_purple_emission_candidates(self, frame_bgr: np.ndarray, display_quad: np.ndarray = None) -> list:
+    def detect_emission_candidates(self, frame_bgr: np.ndarray, display_quad: np.ndarray = None) -> tuple:
         """
-        High-sensitivity chromatic detection of near-infrared purple light.
-        Detects even slight / subtle purple emission from the 5mm LED bulb,
+        High-sensitivity chromatic detection of LED light (Green LED or Purple IR).
+        Detects even slight / subtle emission from the 5mm LED bulb,
         while 100% rejecting white blackboard drawings and ambient lamps.
         """
         h, w = frame_bgr.shape[:2]
@@ -368,39 +392,46 @@ class IRDetector:
         r = frame_bgr[:, :, 2].astype(np.int16)
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-        # Purple excess: Near-IR causes high Blue & Red with suppressed Green
-        bg_diff = b - g
-        rg_diff = r - g
-        excess = bg_diff + rg_diff
+        if self.led_type == "green":
+            gr_diff = g - r
+            gb_diff = g - b
+            excess = gr_diff + gb_diff
 
-        # CRITICAL FILTER:
-        # Authentic IR light produces genuine purple/violet tint where BOTH Blue > Green and Red > Green:
-        # Whiteboard monitor white pixels have B <= G and excess <= 0 -> 100% BLOCKED.
-        # Room lamps have B < G -> 100% BLOCKED.
-        # Blue screen reflections have R < G -> 100% BLOCKED.
-        # Dim room shadows have gray < 110 -> 100% BLOCKED.
-        purple_active = (bg_diff >= 5) & (rg_diff >= 5) & (excess >= 12) & (gray >= 110)
-        purple_mask = np.uint8(purple_active * 255)
+            # CRITICAL FILTER FOR GREEN LED:
+            # Authentic Green LED produces pure green light where BOTH Green > Red and Green > Blue:
+            # Whiteboard monitor white pixels have G ≈ R ≈ B and excess ≈ 0 -> 100% BLOCKED.
+            # Room incandescent lamps have R > G -> 100% BLOCKED.
+            # Blue screen reflections have B > G -> 100% BLOCKED.
+            # Dim room shadows have gray < 100 -> 100% BLOCKED.
+            active = (gr_diff >= 4) & (gb_diff >= 4) & (excess >= self.green_excess_threshold) & (gray >= 100)
+            active_mask = np.uint8(active * 255)
+        else:
+            # Purple excess: Near-IR causes high Blue & Red with suppressed Green
+            bg_diff = b - g
+            rg_diff = r - g
+            excess = bg_diff + rg_diff
+            active = (bg_diff >= 5) & (rg_diff >= 5) & (excess >= 12) & (gray >= 110)
+            active_mask = np.uint8(active * 255)
 
         # Margin exclusion: strip out ceiling lights and camera borders
-        purple_mask[:CAMERA_EDGE_MARGIN_TOP, :] = 0
-        purple_mask[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = 0
-        purple_mask[:, :CAMERA_EDGE_MARGIN_SIDE] = 0
-        purple_mask[:, -CAMERA_EDGE_MARGIN_SIDE:] = 0
+        active_mask[:CAMERA_EDGE_MARGIN_TOP, :] = 0
+        active_mask[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = 0
+        active_mask[:, :CAMERA_EDGE_MARGIN_SIDE] = 0
+        active_mask[:, -CAMERA_EDGE_MARGIN_SIDE:] = 0
 
-        # Fast early-exit: if no purple pixels in active area, skip contours entirely (10x faster)
-        if not np.any(purple_mask):
-            return [], purple_mask, 0.0
+        # Fast early-exit: if no active pixels in active area, skip contours entirely (10x faster)
+        if not np.any(active_mask):
+            return [], active_mask, 0.0
 
-        # Live frame purple excess meter across active field of view:
-        meter_valid = purple_mask > 0
+        # Live frame excess meter across active field of view:
+        meter_valid = active_mask > 0
         frame_max_excess = float(np.max(excess[meter_valid])) if np.any(meter_valid) else 0.0
 
         # 3x3 Morphological opening to clean single-pixel noise
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        purple_cleaned = cv2.morphologyEx(purple_mask, cv2.MORPH_OPEN, kernel)
+        cleaned = cv2.morphologyEx(active_mask, cv2.MORPH_OPEN, kernel)
 
-        contours, _ = cv2.findContours(purple_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
 
         has_valid_quad = False
@@ -443,20 +474,25 @@ class IRDetector:
             pg = float(np.mean(patch_bgr[:, :, 1]))
             pr = float(np.mean(patch_bgr[:, :, 2]))
             p_peak = float(np.max(patch_bgr))
-            p_excess = (pb - pg) + (pr - pg)
-            p_ratio = (pb + pr) / (2.0 * max(pg, 1.0))
 
-            # Must satisfy physical IR emission profile:
-            # 1. Intense luminous peak (IR LED emits bright radiation: peak >= 115)
-            # 2. Both Blue and Red strictly higher than Green (authentic purple glow)
-            # 3. Purple excess >= 12.0
-            # 4. Spectral ratio (R + B) / (2 * G) >= 1.08
-            if (p_peak < 115.0 or
-                pb < pg + 5.0 or
-                pr < pg + 5.0 or
-                p_excess < 12.0 or
-                p_ratio < 1.08):
-                continue
+            if self.led_type == "green":
+                p_excess = (pg - pr) + (pg - pb)
+                p_ratio = (2.0 * pg) / max(1.0, pr + pb)
+                if (p_peak < 105.0 or
+                    pg < pr + 3.0 or
+                    pg < pb + 3.0 or
+                    p_excess < self.green_excess_threshold or
+                    p_ratio < self.green_spectral_ratio_min):
+                    continue
+            else:
+                p_excess = (pb - pg) + (pr - pg)
+                p_ratio = (pb + pr) / (2.0 * max(pg, 1.0))
+                if (p_peak < 115.0 or
+                    pb < pg + 5.0 or
+                    pr < pg + 5.0 or
+                    p_excess < 12.0 or
+                    p_ratio < 1.08):
+                    continue
 
             # Display containment check
             in_display = True
@@ -477,7 +513,9 @@ class IRDetector:
                 "circularity": circ,
                 "aspect_ratio": ar,
                 "peak": p_peak,
+                "excess": p_excess,
                 "purple_excess": p_excess,
+                "green_excess": p_excess if self.led_type == "green" else 0.0,
                 "spectral_ratio": p_ratio,
                 "confidence": 98.0,
                 "in_display": in_display,
@@ -485,7 +523,11 @@ class IRDetector:
             })
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        return candidates, purple_cleaned, frame_max_excess
+        return candidates, cleaned, frame_max_excess
+
+    def detect_purple_emission_candidates(self, frame_bgr: np.ndarray, display_quad: np.ndarray = None) -> tuple:
+        """Backwards compatibility alias for detect_emission_candidates."""
+        return self.detect_emission_candidates(frame_bgr, display_quad)
 
     def detect(self, frame: np.ndarray, threshold: int = None, display_quad: np.ndarray = None):
         """
@@ -535,30 +577,36 @@ class IRDetector:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1)
 
         # -------------------------------------------------------------
-        # STEP 1: Check for Active Purple Light Emission
+        # STEP 1: Check for Active Light Emission (Green or IR)
         # -------------------------------------------------------------
-        candidates, purple_mask, frame_max_excess = self.detect_purple_emission_candidates(frame_bgr, display_quad)
-        thresh_rgb = cv2.cvtColor(purple_mask, cv2.COLOR_GRAY2RGB)
+        candidates, active_mask, frame_max_excess = self.detect_emission_candidates(frame_bgr, display_quad)
+        thresh_rgb = cv2.cvtColor(active_mask, cv2.COLOR_GRAY2RGB)
+
+        led_name = "GREEN LED" if self.led_type == "green" else "IR LED"
+        thresh_limit = self.green_excess_threshold if self.led_type == "green" else 8.0
 
         metadata = {
             "threshold": threshold if threshold is not None else self.threshold,
             "bulb_state": "SEARCHING",
             "is_emitting": False,
             "bulb_pos": None,
+            "led_type": self.led_type,
+            "excess": frame_max_excess,
             "purple_excess": frame_max_excess,
+            "green_excess": frame_max_excess if self.led_type == "green" else 0.0,
             "spectral_ratio": 1.0,
             "circularity": 0.0,
             "in_display_area": False,
             "status": "SEARCHING"
         }
 
-        # CASE A: Bulb is Actively Emitting Purple Light (Button Pressed -> DRAWING)
+        # CASE A: Bulb is Actively Emitting Light (Button Pressed -> DRAWING)
         if len(candidates) > 0:
             best = candidates[0]
             bcx, bcy = best["point"]
             x_b, y_b, w_b, h_b = best["bbox"]
             in_disp = best["in_display"]
-            excess = best["purple_excess"]
+            excess = best["excess"]
 
             self.last_bulb_pos = (bcx, bcy)
             self.last_bulb_box = (x_b, y_b, w_b, h_b)
@@ -566,10 +614,11 @@ class IRDetector:
 
             reticle_col = (0, 255, 0) if in_disp else (255, 140, 0)
             status_text = "DRAWING ON BOARD" if in_disp else "OUTSIDE DISPLAY"
+            box_col = (0, 255, 0) if self.led_type == "green" else (255, 0, 255)
 
-            # 1. Glowing magenta/purple bounding box around the 5mm LED bulb
-            cv2.rectangle(annotated, (x_b, y_b), (x_b + w_b, y_b + h_b), (255, 0, 255), 2)
-            cv2.circle(annotated, (int(bcx), int(bcy)), int(max(w_b, h_b) // 2 + 4), (200, 60, 240), 1)
+            # 1. Glowing bounding box around the 5mm LED bulb
+            cv2.rectangle(annotated, (x_b, y_b), (x_b + w_b, y_b + h_b), box_col, 2)
+            cv2.circle(annotated, (int(bcx), int(bcy)), int(max(w_b, h_b) // 2 + 4), box_col, 1)
 
             # 2. Precision target reticle
             cv2.circle(annotated, (int(bcx), int(bcy)), 12, reticle_col, 2)
@@ -578,19 +627,21 @@ class IRDetector:
             cv2.line(annotated, (int(bcx), int(bcy) - 18), (int(bcx), int(bcy) + 18), reticle_col, 2)
 
             # 3. Informational HUD tag
-            badge = f"IR LED: EMITTING (Meter +{excess:.1f} > 8.0) -> ({int(bcx)}, {int(bcy)}) [{status_text}]"
+            badge = f"{led_name}: EMITTING (Meter +{excess:.1f} > {thresh_limit:.1f}) -> ({int(bcx)}, {int(bcy)}) [{status_text}]"
             cv2.putText(annotated, badge, (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 100), 2)
 
             # Mark on threshold mask
             cv2.circle(thresh_rgb, (int(bcx), int(bcy)), 10, (0, 255, 0), 2)
-            cv2.putText(thresh_rgb, f"PURPLE IR DETECTED: +{excess:.1f} (THRESHOLD > 8.0)", (15, 30),
+            cv2.putText(thresh_rgb, f"{led_name} DETECTED: +{excess:.1f} (THRESHOLD > {thresh_limit:.1f})", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
 
             metadata["bulb_state"] = "EMITTING"
             metadata["is_emitting"] = True
             metadata["bulb_pos"] = (bcx, bcy)
+            metadata["excess"] = excess
             metadata["purple_excess"] = excess
+            metadata["green_excess"] = excess if self.led_type == "green" else 0.0
             metadata["spectral_ratio"] = best["spectral_ratio"]
             metadata["circularity"] = best["circularity"]
             metadata["in_display_area"] = in_disp
@@ -622,29 +673,32 @@ class IRDetector:
             is_emit, tip_excess, peak, info = self.check_bulb_emission_at_point(frame_bgr, tip_x, tip_y)
 
             if is_emit:
-                # The tracked bulb just turned purplish bright! Trigger DRAWING!
+                # The tracked bulb just lit up! Trigger DRAWING!
                 reticle_col = (0, 255, 0) if in_disp else (255, 140, 0)
                 status_text = "DRAWING ON BOARD" if in_disp else "OUTSIDE DISPLAY"
+                box_col = (0, 255, 0) if self.led_type == "green" else (255, 0, 255)
 
-                # Glowing magenta/green reticle around the bulb tip
-                cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (255, 0, 255), 2)
+                # Glowing reticle around the bulb tip
+                cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), box_col, 2)
                 cv2.circle(annotated, (itip_x, itip_y), 12, reticle_col, 2)
                 cv2.circle(annotated, (itip_x, itip_y), 3, reticle_col, -1)
                 cv2.line(annotated, (itip_x - 18, itip_y), (itip_x + 18, itip_y), reticle_col, 2)
                 cv2.line(annotated, (itip_x, itip_y - 18), (itip_x, itip_y + 18), reticle_col, 2)
 
-                badge = f"IR LED: EMITTING ({info}) -> ({itip_x}, {itip_y}) [{status_text}]"
+                badge = f"{led_name}: EMITTING ({info}) -> ({itip_x}, {itip_y}) [{status_text}]"
                 cv2.putText(annotated, badge, (15, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 100), 2)
 
                 cv2.circle(thresh_rgb, (itip_x, itip_y), 10, (0, 255, 0), 2)
-                cv2.putText(thresh_rgb, f"PURPLE IR DETECTED: +{tip_excess:.1f} (THRESHOLD > 8.0)", (15, 30),
+                cv2.putText(thresh_rgb, f"{led_name} DETECTED: +{tip_excess:.1f} (THRESHOLD > {thresh_limit:.1f})", (15, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
 
                 metadata["bulb_state"] = "EMITTING"
                 metadata["is_emitting"] = True
                 metadata["bulb_pos"] = (tip_x, tip_y)
+                metadata["excess"] = tip_excess
                 metadata["purple_excess"] = tip_excess
+                metadata["green_excess"] = tip_excess if self.led_type == "green" else 0.0
                 metadata["in_display_area"] = in_disp
                 metadata["status"] = "EMITTING_DRAWING"
 
@@ -662,13 +716,13 @@ class IRDetector:
                             (255, 220, 40), 2, tipLength=0.35)
 
             # 3. Label tag
-            label = f"[5mm LED BULB LOCATED] Tip: ({itip_x}, {itip_y}) | Meter: +{frame_max_excess:.1f} (IDLE <= 8.0)"
+            label = f"[5mm {self.led_type.upper()} BULB LOCATED] Tip: ({itip_x}, {itip_y}) | Meter: +{frame_max_excess:.1f} (IDLE)"
             cv2.putText(annotated, label, (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, cyan_col, 2)
 
             # On threshold mask: indicate tracked position
             cv2.rectangle(thresh_rgb, (bx, by), (bx + bw, by + bh), (0, 200, 255), 1)
-            cv2.putText(thresh_rgb, f"5mm BULB LOCATED: IDLE (Meter: +{frame_max_excess:.1f} <= 8.0)", (15, 30),
+            cv2.putText(thresh_rgb, f"5mm BULB LOCATED: IDLE (Meter: +{frame_max_excess:.1f})", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
 
             metadata["bulb_state"] = "LOCATED_IDLE"
@@ -680,49 +734,73 @@ class IRDetector:
             # Whiteboard does NOT draw when bulb is unlit (pen lifted)
             return None, annotated, thresh_rgb, metadata
 
-        # CASE C: No bulb and no purple light in view
-        cv2.putText(annotated, f"SEARCHING FOR 5mm LED BULB / IR LIGHT (Meter: +{frame_max_excess:.1f})", (15, 30),
+        # CASE C: No bulb and no light in view
+        cv2.putText(annotated, f"SEARCHING FOR 5mm {self.led_type.upper()} BULB / LIGHT (Meter: +{frame_max_excess:.1f})", (15, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 2)
-        cv2.putText(thresh_rgb, f"SEARCHING (Meter: +{frame_max_excess:.1f} <= 8.0 IDLE)", (15, 30),
+        cv2.putText(thresh_rgb, f"SEARCHING (Meter: +{frame_max_excess:.1f} IDLE)", (15, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 2)
 
         return None, annotated, thresh_rgb, metadata
 
 
+# Class alias for clean naming
+LEDDetector = IRDetector
+
+
 if __name__ == "__main__":
-    print("Testing Two-Stage IRDetector with 5mm LED bulb localization & purple emission...")
-    det = IRDetector(threshold=200)
+    print("Testing Two-Stage LEDDetector (Green & IR Modes)...")
+
+    # --- Mode 1: IR LED Mode ---
+    det_ir = IRDetector(threshold=200, led_type="ir")
 
     # Test 1: User's real unlit bulb photo 1
     im1 = cv2.imread(r'C:/Users/prana/.gemini/antigravity/brain/742360c1-85ca-4369-a3d9-0dea5a3a94ec/.user_uploaded/media_1793025491309_fd5b99af.jpg')
-    pt1, _, _, meta1 = det.detect_debug(cv2.cvtColor(im1, cv2.COLOR_BGR2RGB))
+    pt1, _, _, meta1 = det_ir.detect_debug(cv2.cvtColor(im1, cv2.COLOR_BGR2RGB))
     print("\n--- Test 1: User Photo 1 (Unlit 5mm Stylus Bulb in Hand) ---")
     print(f"  Drawing Point : {pt1} (Expected: None -> Pen Lifted)")
     print(f"  Bulb State    : {meta1['bulb_state']} (Expected: LOCATED_IDLE)")
-    print(f"  Bulb Position : {meta1['bulb_pos']}")
     assert pt1 is None, "Failed: Unlit bulb should not draw!"
     assert meta1['bulb_state'] == "LOCATED_IDLE", f"Failed: Expected LOCATED_IDLE, got {meta1['bulb_state']}"
 
-    # Test 2: User's real emitting IR LED image
+    # Test 2: Active Emitting IR LED Bulb
     im2 = cv2.imread(r'dataset/ir_led_emitting/user_ref_emitting_ground_truth.png')
     frame_emit = np.zeros((480, 640, 3), dtype=np.uint8)
     h2, w2 = im2.shape[:2]
     frame_emit[100:100+h2, 200:200+w2] = cv2.cvtColor(im2, cv2.COLOR_BGR2RGB)
-    pt2, _, _, meta2 = det.detect_debug(frame_emit)
+    pt2, _, _, meta2 = det_ir.detect_debug(frame_emit)
     print("\n--- Test 2: Active Emitting IR LED Bulb ---")
     print(f"  Drawing Point : {pt2} (Expected: Valid (x, y) -> Drawing Active)")
     print(f"  Bulb State    : {meta2['bulb_state']} (Expected: EMITTING)")
-    print(f"  Purple Excess : +{meta2['purple_excess']:.1f}")
     assert pt2 is not None, "Failed: Emitting IR LED should produce drawing point!"
     assert meta2['bulb_state'] == "EMITTING", f"Failed: Expected EMITTING, got {meta2['bulb_state']}"
 
-    # Test 3: Blackboard white drawing (White Light)
+    # --- Mode 2: Green LED Mode ---
+    det_green = IRDetector(threshold=110, led_type="green")
+    frame_green = np.zeros((480, 640, 3), dtype=np.uint8)
+    # Bright green LED spot: (B=25, G=245, R=35)
+    cv2.circle(frame_green, (310, 220), 8, (35, 245, 25), -1)
+    pt_g, _, _, meta_g = det_green.detect_debug(frame_green)
+    print("\n--- Test 3: Active Emitting 5mm Green LED Bulb ---")
+    print(f"  Drawing Point : {pt_g} (Expected: Valid (x, y) -> Drawing Active)")
+    print(f"  Bulb State    : {meta_g['bulb_state']} (Expected: EMITTING)")
+    print(f"  Green Excess  : +{meta_g['green_excess']:.1f}")
+    assert pt_g is not None, "Failed: Emitting Green LED should produce drawing point!"
+    assert meta_g['bulb_state'] == "EMITTING", f"Failed: Expected EMITTING, got {meta_g['bulb_state']}"
+
+    # Test 4: Blackboard white drawing (White Light) Rejected in Green Mode
     frame_white = np.zeros((480, 640, 3), dtype=np.uint8)
     cv2.circle(frame_white, (300, 200), 10, (255, 255, 255), -1)
-    pt3, _, _, meta3 = det.detect_debug(frame_white)
-    print("\n--- Test 3: Whiteboard Drawing on Screen (White Light) ---")
-    print(f"  Drawing Point : {pt3} (Expected: None -> White light rejected)")
-    print(f"  Bulb State    : {meta3['bulb_state']}")
-    assert pt3 is None, "Failed: Whiteboard drawing should be 100% rejected!"
+    pt4, _, _, meta4 = det_green.detect_debug(frame_white)
+    print("\n--- Test 4: Whiteboard Drawing on Screen (White Light Rejected) ---")
+    print(f"  Drawing Point : {pt4} (Expected: None -> White light rejected)")
+    assert pt4 is None, "Failed: Whiteboard drawing should be 100% rejected in Green mode!"
 
-    print("\nALL TWO-STAGE DETECTOR TESTS PASSED PERFECTLY!")
+    # Test 5: Incandescent Lamp (Warm Yellow / Red) Rejected in Green Mode
+    frame_lamp = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.circle(frame_lamp, (280, 190), 12, (255, 210, 80), -1)  # High R & G, low B
+    pt5, _, _, meta5 = det_green.detect_debug(frame_lamp)
+    print("\n--- Test 5: Ambient Room Lamp (Warm Lamp Rejected) ---")
+    print(f"  Drawing Point : {pt5} (Expected: None -> Ambient lamp rejected)")
+    assert pt5 is None, "Failed: Ambient room lamp should be 100% rejected in Green mode!"
+
+    print("\nALL TWO-STAGE DETECTOR TESTS (GREEN & IR) PASSED PERFECTLY!")

@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from detector import IRDetector
 
-det = IRDetector(threshold=180)
+det = IRDetector(threshold=180, led_type="ir")
 
 # 1. Test user's real emitting IR LED image (Image 2)
 p_emit = Path('dataset/ir_led_emitting/user_ref_emitting_ground_truth.png')
