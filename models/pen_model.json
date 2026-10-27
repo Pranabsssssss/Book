@@ -1,9 +1,9 @@
 {
   "model_name": "PenInHand_IR_Bulb_Detector",
   "version": "2.0.0",
-  "created_at": "2026-10-27 11:09:58",
-  "num_templates": 21,
-  "correlation_threshold": 0.82,
+  "created_at": "2026-10-27 11:14:19",
+  "num_templates": 5649,
+  "correlation_threshold": 0.92,
   "pen_shaft_min_score": 0.35,
   "ir_purple_excess_threshold": 8.0,
   "bulb_type": "5mm_clear_dome_with_leadframe",
