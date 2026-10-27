@@ -183,6 +183,32 @@ class Camera:
         self.running = False
         print("[Camera] Stopped.")
 
+    def open(self) -> bool:
+        """Alias for start() returning boolean success."""
+        try:
+            self.start()
+            return True
+        except Exception as e:
+            print(f"[Camera] Error opening camera: {e}")
+            return False
+
+    def close(self):
+        """Alias for stop()."""
+        self.stop()
+
+    def read(self):
+        """Standard OpenCV-like read method returning (ret, frame_bgr)."""
+        if not self.running:
+            return False, None
+        try:
+            frame_rgb = self.capture_frame()
+            if frame_rgb is None:
+                return False, None
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            return True, frame_bgr
+        except Exception:
+            return False, None
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Camera Interface")
