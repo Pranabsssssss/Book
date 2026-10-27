@@ -82,8 +82,14 @@ def measure_green_optical_properties(frame_bgr: np.ndarray) -> tuple:
     gb = g - b
     excess = gr + gb
 
-    # Authentic Green emission: Green strictly higher than both Red and Blue
-    active = (gr >= 4) & (gb >= 4) & (excess >= 12) & (gray >= 95)
+    # 1. Authentic Green emission (halo and direct green light)
+    green_halo = (gr >= 4) & (gb >= 4) & (excess >= 12) & (gray >= 90)
+
+    # 2. Saturated core blooming on paper/sheets
+    sat_core = (gray >= 230) & (g >= 235)
+    kernel_halo = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    halo_dilated = cv2.dilate(np.uint8(green_halo * 255), kernel_halo) > 0
+    active = green_halo | (sat_core & halo_dilated)
 
     # Margins
     active[:CAMERA_EDGE_MARGIN_TOP, :] = False
@@ -92,9 +98,15 @@ def measure_green_optical_properties(frame_bgr: np.ndarray) -> tuple:
     active[:, -CAMERA_EDGE_MARGIN_SIDE:] = False
 
     if np.any(active):
-        max_val = float(np.max(excess[active]))
-        locs = np.argwhere(active & (excess == max_val))
-        best_pt = (float(locs[0][1]), float(locs[0][0])) if len(locs) > 0 else None
+        max_val = float(np.max(excess[green_halo])) if np.any(green_halo) else float(np.max(excess[active]))
+        
+        # Calculate centroid of active spot for precision tracking
+        M = cv2.moments(np.uint8(active * 255))
+        if M["m00"] > 0:
+            best_pt = (float(M["m10"] / M["m00"]), float(M["m01"] / M["m00"]))
+        else:
+            locs = np.argwhere(active)
+            best_pt = (float(locs[0][1]), float(locs[0][0]))
 
         # Sample patch around best point
         px, py = int(best_pt[0]), int(best_pt[1])

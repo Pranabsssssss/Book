@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from config import (
     IR_THRESHOLD, IR_MIN_AREA, IR_MAX_AREA,
+    GREEN_MIN_AREA, GREEN_MAX_AREA,
     CAMERA_EDGE_MARGIN_TOP, CAMERA_EDGE_MARGIN_BOTTOM, CAMERA_EDGE_MARGIN_SIDE,
     CAMERA_WIDTH, CAMERA_HEIGHT,
     IR_SPECTRAL_RATIO_MIN, IR_PURPLE_EXCESS_MIN, IR_PURPLE_EXCESS_THRESHOLD,
@@ -19,30 +20,37 @@ def sigmoid(z):
 
 class IRDetector:
     """
-    Two-Stage 5mm IR LED Bulb Stylus & Purple Infrared Emission Detector.
+    Two-Stage 5mm LED Bulb Stylus (Green LED or Purple IR) & Light Emission Detector.
 
     1. STAGE 1 (Physical Bulb Localization):
-       Detects the physical 5mm clear through-hole LED bulb (the stylus tip as shown
-       in the user's photos) in ambient light even when unlit. In Dev Mode, points directly
-       to the bulb tip with a cyan reticle and arrow: [5mm BULB LOCATED: IDLE].
+       Detects the physical 5mm through-hole LED bulb (the stylus tip) in ambient light
+       even when unlit. In Dev Mode, points directly to the bulb tip with a cyan reticle:
+       [5mm BULB LOCATED: IDLE].
 
-    2. STAGE 2 (Active Purple Emission & Drawing Trigger):
-       High-sensitivity optical chromaticity detector that triggers when the LED emits
-       even a subtle / slight purple near-infrared glow (push button pressed).
-       Immediately transitions to [IR LED: EMITTING] and marks/draws on the whiteboard canvas!
+    2. STAGE 2 (Active Emission & Drawing Trigger):
+       High-sensitivity optical chromaticity detector that triggers when the LED emits light
+       (Green LED beam or purple IR glow when push button pressed).
+       Supports direct LED bulb emission and scattered light pools on desk paper/sheets!
+       Immediately transitions to [LED: EMITTING] and marks/draws on the whiteboard canvas!
 
     3. HIGH-ACCURACY FALSE POSITIVE REJECTION:
-       100% hard rejects white blackboard drawings on the monitor (where B <= G, excess <= 0)
-       and warm ambient room lamps (where B < G). Never causes runaway drawing loops!
+       100% hard rejects white blackboard drawings on the monitor (G ≈ R ≈ B, excess ≈ 0)
+       and warm ambient room lamps (R > G, excess < 0). Never causes runaway drawing loops!
     """
-    def __init__(self, threshold=None, min_area=IR_MIN_AREA, max_area=IR_MAX_AREA, led_type=None):
+    def __init__(self, threshold=None, min_area=None, max_area=None, led_type=None):
         self.led_type = (led_type or LED_TYPE).lower()
         if threshold is not None:
             self.threshold = threshold
         else:
             self.threshold = GREEN_THRESHOLD if self.led_type == "green" else IR_THRESHOLD
-        self.min_area = min_area
-        self.max_area = max_area
+
+        if self.led_type == "green":
+            self.min_area = min_area if min_area is not None else GREEN_MIN_AREA
+            self.max_area = max_area if max_area is not None else GREEN_MAX_AREA
+        else:
+            self.min_area = min_area if min_area is not None else IR_MIN_AREA
+            self.max_area = max_area if max_area is not None else IR_MAX_AREA
+
         self.green_excess_threshold = GREEN_EXCESS_THRESHOLD
         self.green_spectral_ratio_min = GREEN_SPECTRAL_RATIO_MIN
 
@@ -397,39 +405,43 @@ class IRDetector:
             gb_diff = g - b
             excess = gr_diff + gb_diff
 
-            # CRITICAL FILTER FOR GREEN LED:
-            # Authentic Green LED produces pure green light where BOTH Green > Red and Green > Blue:
-            # Whiteboard monitor white pixels have G ≈ R ≈ B and excess ≈ 0 -> 100% BLOCKED.
-            # Room incandescent lamps have R > G -> 100% BLOCKED.
-            # Blue screen reflections have B > G -> 100% BLOCKED.
-            # Dim room shadows have gray < 100 -> 100% BLOCKED.
-            active = (gr_diff >= 4) & (gb_diff >= 4) & (excess >= self.green_excess_threshold) & (gray >= 100)
-            active_mask = np.uint8(active * 255)
+            # 1. Pure green emission (halo and direct green light)
+            thresh = min(self.green_excess_threshold, 18.0)
+            green_halo = (gr_diff >= 4) & (gb_diff >= 4) & (excess >= thresh) & (gray >= 90)
+
+            # 2. Saturated core handling (center of the spot on white paper where sensor well blooms to white)
+            sat_core = (gray >= 230) & (g >= 235)
+
+            # 3. Saturated core is recognized as green light if touching or surrounded by green halo
+            kernel_halo = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+            halo_dilated = cv2.dilate(np.uint8(green_halo * 255), kernel_halo) > 0
+            true_green_light = green_halo | (sat_core & halo_dilated)
+
+            # 4. Morphological closing to seal the donut hole into a solid circular disc
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            cleaned = cv2.morphologyEx(np.uint8(true_green_light * 255), cv2.MORPH_CLOSE, kernel_close)
         else:
             # Purple excess: Near-IR causes high Blue & Red with suppressed Green
             bg_diff = b - g
             rg_diff = r - g
             excess = bg_diff + rg_diff
             active = (bg_diff >= 5) & (rg_diff >= 5) & (excess >= 12) & (gray >= 110)
-            active_mask = np.uint8(active * 255)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            cleaned = cv2.morphologyEx(np.uint8(active * 255), cv2.MORPH_OPEN, kernel)
 
         # Margin exclusion: strip out ceiling lights and camera borders
-        active_mask[:CAMERA_EDGE_MARGIN_TOP, :] = 0
-        active_mask[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = 0
-        active_mask[:, :CAMERA_EDGE_MARGIN_SIDE] = 0
-        active_mask[:, -CAMERA_EDGE_MARGIN_SIDE:] = 0
+        cleaned[:CAMERA_EDGE_MARGIN_TOP, :] = 0
+        cleaned[-CAMERA_EDGE_MARGIN_BOTTOM:, :] = 0
+        cleaned[:, :CAMERA_EDGE_MARGIN_SIDE] = 0
+        cleaned[:, -CAMERA_EDGE_MARGIN_SIDE:] = 0
 
         # Fast early-exit: if no active pixels in active area, skip contours entirely (10x faster)
-        if not np.any(active_mask):
-            return [], active_mask, 0.0
+        if not np.any(cleaned):
+            return [], cleaned, 0.0
 
         # Live frame excess meter across active field of view:
-        meter_valid = active_mask > 0
+        meter_valid = cleaned > 0
         frame_max_excess = float(np.max(excess[meter_valid])) if np.any(meter_valid) else 0.0
-
-        # 3x3 Morphological opening to clean single-pixel noise
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned = cv2.morphologyEx(active_mask, cv2.MORPH_OPEN, kernel)
 
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
@@ -446,12 +458,15 @@ class IRDetector:
 
             peri = cv2.arcLength(c, True)
             circ = (4.0 * np.pi * area) / (peri * peri) if peri > 0 else 0.0
-            if circ < 0.18:
+            min_circ = 0.20 if self.led_type == "green" else 0.18
+            if circ < min_circ:
                 continue
 
             x_b, y_b, w_b, h_b = cv2.boundingRect(c)
             ar = float(w_b) / max(1.0, float(h_b))
-            if not (0.35 <= ar <= 2.8):
+            min_ar = 0.30 if self.led_type == "green" else 0.35
+            max_ar = 3.2 if self.led_type == "green" else 2.8
+            if not (min_ar <= ar <= max_ar):
                 continue
 
             M = cv2.moments(c)
@@ -476,13 +491,10 @@ class IRDetector:
             p_peak = float(np.max(patch_bgr))
 
             if self.led_type == "green":
-                p_excess = (pg - pr) + (pg - pb)
+                p_excess = float(np.max(excess[max(0, y_b):min(h, y_b + h_b), max(0, x_b):min(w, x_b + w_b)]))
                 p_ratio = (2.0 * pg) / max(1.0, pr + pb)
-                if (p_peak < 105.0 or
-                    pg < pr + 3.0 or
-                    pg < pb + 3.0 or
-                    p_excess < self.green_excess_threshold or
-                    p_ratio < self.green_spectral_ratio_min):
+                if (p_peak < 100.0 or
+                    p_excess < min(self.green_excess_threshold, 18.0)):
                     continue
             else:
                 p_excess = (pb - pg) + (pr - pg)

@@ -111,8 +111,11 @@ IR_SPECTRAL_RATIO_MIN = 1.14      # (R + B) / (2 * max(G, 1)) must exceed this t
 IR_PURPLE_EXCESS_MIN = 8.0        # (B - G) + (R - G) must exceed this (calibrated to >= 8.0)
 
 # Minimum and maximum contour areas in pixels.
+# When a green LED shines on paper/sheets, the scattered light pool creates a bright circle of area 10 - 4500 px.
+GREEN_MIN_AREA = 10
+GREEN_MAX_AREA = 4500
+
 # An IR LED / remote light tip is compact (typically 4 - 500 px).
-# Blobs larger than 500px are ambient ceiling fixtures or window glare, not an IR pen tip.
 IR_MIN_AREA = 4
 IR_MAX_AREA = 500
 
