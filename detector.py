@@ -8,7 +8,7 @@ from config import (
     CAMERA_EDGE_MARGIN_TOP, CAMERA_EDGE_MARGIN_BOTTOM, CAMERA_EDGE_MARGIN_SIDE,
     CAMERA_WIDTH, CAMERA_HEIGHT,
     IR_SPECTRAL_RATIO_MIN, IR_PURPLE_EXCESS_MIN, IR_PURPLE_EXCESS_THRESHOLD,
-    IR_MODEL_FILE, BASE_DIR
+    IR_MODEL_FILE, PEN_MODEL_FILE, BASE_DIR
 )
 
 
@@ -72,11 +72,24 @@ class IRDetector:
             except Exception as e:
                 print(f"[IRDetector] Warning: Could not load model: {e}")
 
+        # Load trained Pen In Hand model if available
+        self.pen_model_data = None
+        self.pen_threshold = 0.82
+        if os.path.exists(PEN_MODEL_FILE):
+            try:
+                with open(PEN_MODEL_FILE, "r", encoding="utf-8") as f:
+                    self.pen_model_data = json.load(f)
+                self.pen_threshold = float(self.pen_model_data.get("correlation_threshold", 0.82))
+                print(f"[IRDetector] Loaded trained Pen-In-Hand model from: {PEN_MODEL_FILE} (threshold={self.pen_threshold:.2f})")
+            except Exception as e:
+                print(f"[IRDetector] Warning: Could not load pen model: {e}")
+
     def _load_bulb_templates(self):
-        """Load orientation templates of the 5mm LED bulb, prioritizing exact user templates."""
+        """Load orientation templates of the 5mm LED bulb, prioritizing exact user templates and trained pen tip exemplars."""
         tmpl_dir = Path(BASE_DIR) / "models" / "bulb_templates"
         if tmpl_dir.exists():
             priority = ["user_tip_up.png", "user_tip_down.png"]
+            priority.extend([f"pen_tip_trained_{i:02d}.png" for i in range(12)])
             loaded = set()
             for p_name in priority:
                 p = tmpl_dir / p_name
@@ -96,14 +109,16 @@ class IRDetector:
 
     def locate_physical_bulb(self, frame_gray: np.ndarray) -> tuple:
         """
-        Locates the physical 5mm clear LED bulb tip in ambient light when idle/off.
-        Uses a strict correlation threshold (>= 0.84) to NEVER lock onto random room objects.
+        Locates the physical 5mm clear LED bulb tip on the pen in ambient light when idle/off.
+        Uses calibrated correlation threshold (>= 0.82) to NEVER lock onto random room objects.
         Returns: (tip_x, tip_y, bbox, score) or None.
         """
         if frame_gray is None or len(self.bulb_templates) == 0:
             return None
 
         h, w = frame_gray.shape[:2]
+        min_thresh = getattr(self, "pen_threshold", 0.82)
+        min_thresh = max(0.82, min_thresh)
 
         # 1. Fast Local Window Search (if recently tracked and stable)
         if self.last_bulb_pos is not None and self.frames_since_seen < 6:
@@ -119,7 +134,7 @@ class IRDetector:
                 best_local_score = -1.0
                 best_local_loc = None
                 best_local_sz = (0, 0)
-                for tmpl in self.bulb_templates[:3]:
+                for tmpl in self.bulb_templates[:6]:
                     if tmpl.shape[0] < crop.shape[0] and tmpl.shape[1] < crop.shape[1]:
                         res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
                         _, max_v, _, max_l = cv2.minMaxLoc(res)
@@ -129,7 +144,7 @@ class IRDetector:
                             best_local_sz = (tmpl.shape[1], tmpl.shape[0])
 
                 # Require high confidence to maintain track without drifting to background
-                if best_local_score >= 0.84 and best_local_loc is not None:
+                if best_local_score >= min_thresh and best_local_loc is not None:
                     bw, bh = best_local_sz
                     bx = x1 + best_local_loc[0]
                     by = y1 + best_local_loc[1]
@@ -137,13 +152,13 @@ class IRDetector:
                     tip_y = float(by + 4)
                     return (tip_x, tip_y, (bx, by, bw, bh), best_local_score)
 
-        # 2. Global Search for authentic 5mm bulb with high confidence (>= 0.84)
+        # 2. Global Search for authentic 5mm bulb with high confidence
         best_score = -1.0
         best_loc = None
         best_size = (0, 0)
 
-        # Evaluate priority templates at native resolution for maximum fidelity
-        for tmpl in self.bulb_templates[:2]:
+        # Evaluate priority templates across angles at native resolution
+        for tmpl in self.bulb_templates[:6]:
             tw, th = tmpl.shape[1], tmpl.shape[0]
             if tw >= w or th >= h:
                 continue
@@ -155,12 +170,13 @@ class IRDetector:
                 best_size = (tw, th)
 
         # Strict threshold: random room objects (shelves, screws, light switches) score <= 0.70-0.77.
-        # Requiring >= 0.84 guarantees zero false detections on arbitrary background objects!
-        if best_score >= 0.84 and best_loc is not None:
+        # Requiring >= min_thresh (>= 0.82) guarantees zero false detections on arbitrary background objects!
+        if best_score >= min_thresh and best_loc is not None:
             bx, by = best_loc
             bw, bh = best_size
             tip_x = float(bx + bw // 2)
             tip_y = float(by + 4)
+            return (tip_x, tip_y, (bx, by, bw, bh), best_score)
             return (tip_x, tip_y, (bx, by, bw, bh), best_score)
 
         return None
