@@ -98,7 +98,7 @@ LED_TYPE = "green"
 # with suppressed Red (R) and Blue (B).
 # Green Excess = (G - R) + (G - B). White light has G ≈ R ≈ B (excess ≈ 0), room lamps have R > G (excess < 0).
 GREEN_EXCESS_THRESHOLD = 24.0      # Empirical threshold (> 15.0 = Green LED emission guaranteed)
-GREEN_SPECTRAL_RATIO_MIN = 1.15    # 2*G / (max(1.0, R + B))
+GREEN_SPECTRAL_RATIO_MIN = 1.18    # 2*G / (max(1.0, R + B))
 GREEN_THRESHOLD = 110              # Brightness threshold for green light
 
 # --- IR / Near-Infrared Spectral Thresholds ---
@@ -112,12 +112,12 @@ IR_PURPLE_EXCESS_MIN = 8.0        # (B - G) + (R - G) must exceed this (calibrat
 
 # Minimum and maximum contour areas in pixels.
 # When a green LED shines on paper/sheets, the scattered light pool creates a bright circle of area 10 - 4500 px.
-GREEN_MIN_AREA = 10
-GREEN_MAX_AREA = 4500
+GREEN_MIN_AREA = 25
+GREEN_MAX_AREA = 2800
 
-# An IR LED / remote light tip is compact (typically 4 - 500 px).
+# An IR LED / remote light tip is compact (typically 4 - 1200 px).
 IR_MIN_AREA = 4
-IR_MAX_AREA = 500
+IR_MAX_AREA = 1200
 
 # === Pen & Eraser Configuration ===
 PEN_COLOR = (255, 255, 255)    # Pure white

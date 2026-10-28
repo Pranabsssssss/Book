@@ -1,7 +1,33 @@
 {
-  "model_name": "Pen_In_Hand_Green_Stylus_Model",
+  "model_name": "Trained_Pen_In_Hand_Model",
   "timestamp": "2026-10-27 14:56:41",
   "led_type": "green",
-  "correlation_threshold": 0.84,
-  "calibrated_green_excess": 24.0
+  "correlation_threshold": 0.82,
+  "calibrated_green_excess": 24.0,
+  "canonical_templates": [
+    "user_camroll_tip_00.png",
+    "user_camroll_tip_01.png",
+    "user_camroll_tip_02.png",
+    "user_camroll_tip_03.png",
+    "user_camroll_tip_04.png",
+    "user_camroll_tip_05.png",
+    "user_camroll_tip_06.png",
+    "user_camroll_tip_07.png"
+  ],
+  "training_photos": [
+    "WIN_20261027_11_14_43_Pro.jpg",
+    "WIN_20261027_11_14_44_Pro.jpg",
+    "WIN_20261028_09_36_18_Pro.jpg",
+    "WIN_20261028_09_36_19_Pro.jpg",
+    "WIN_20261028_09_36_20_Pro.jpg",
+    "WIN_20261028_09_36_23_Pro.jpg",
+    "WIN_20261028_09_36_24_Pro.jpg",
+    "WIN_20261028_09_36_25_Pro (2).jpg",
+    "WIN_20261028_09_36_25_Pro.jpg",
+    "WIN_20261028_09_36_26_Pro.jpg",
+    "WIN_20261028_09_36_27_Pro.jpg",
+    "WIN_20261028_09_36_28_Pro.jpg",
+    "WIN_20261028_09_36_29_Pro (2).jpg",
+    "WIN_20261028_09_36_29_Pro.jpg"
+  ]
 }
